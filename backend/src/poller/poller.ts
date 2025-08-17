@@ -93,6 +93,12 @@ export async function pollService(serviceId: string, logger: any) {
       }
       const name = (d as any).name || (d as any).service || (d as any).id;
       if (!name) continue;
+      // Determine type precedence: explicit d.type, then nested checkDetails.type, else 'unknown'
+      let depType: string | undefined = (d as any).type;
+      const checkDetails = (d as any).checkDetails;
+      if (!depType && checkDetails && typeof checkDetails === 'object' && typeof checkDetails.type === 'string') {
+        depType = checkDetails.type;
+      }
       // Check manual override first
       const override = await prisma.dependencyMappingOverride.findUnique({ where: { parentServiceId_dependencyName: { parentServiceId: service.id, dependencyName: name } }}).catch(()=>null);
       let mapped = undefined as any;
@@ -106,13 +112,58 @@ export async function pollService(serviceId: string, logger: any) {
       if ((d as any).meta !== undefined) {
         try { metaStr = JSON.stringify((d as any).meta); } catch { metaStr = null; }
       }
-  normalized.push({ pollRunId: pollRun.id, parentServiceId: service.id, dependencyName: name, dependencyType: (d as any).type || 'unknown', mappedServiceId: mapped?.id, status, metaJson: metaStr });
+      // If we have checkDetails and no meta, include it inside meta for visibility
+      if (!metaStr && checkDetails) {
+        try { metaStr = JSON.stringify({ checkDetails }); } catch { /* ignore */ }
+      } else if (metaStr && checkDetails) {
+        // merge existing meta with checkDetails if meta was object
+        try {
+          const existing = JSON.parse(metaStr);
+          const merged = { ...existing, checkDetails };
+          metaStr = JSON.stringify(merged);
+        } catch { /* ignore */ }
+      }
+      // Merge in health object if present (so graph can read health.latency)
+      const health = (d as any).health;
+      if (health && typeof health === 'object') {
+        if (!metaStr) {
+          try { metaStr = JSON.stringify({ health }); } catch { /* ignore */ }
+        } else {
+          try {
+            const existing = JSON.parse(metaStr);
+            if (!existing.health || typeof existing.health !== 'object') {
+              existing.health = health;
+            } else {
+              existing.health = { ...existing.health, ...health };
+            }
+            metaStr = JSON.stringify(existing);
+          } catch { /* ignore */ }
+        }
+      }
+  normalized.push({ pollRunId: pollRun.id, parentServiceId: service.id, dependencyName: name, dependencyType: depType || 'unknown', mappedServiceId: mapped?.id, status, metaJson: metaStr });
     }
     if (normalized.length === 0 && deps.length > 0) {
       fastDebug(logger, 'poll.deps.filtered_all_out', { serviceId: service.id, rawDepsCount: deps.length });
     }
     if (normalized.length) {
       await prisma.dependency.createMany({ data: normalized });
+    }
+    // Maintain current dependencies snapshot table
+    // Strategy: upsert each normalized row, then remove stale rows no longer present
+    if (normalized.length) {
+      const names = normalized.map(n=>n.dependencyName);
+      for (const n of normalized) {
+        await prisma.serviceDependencyCurrent.upsert({
+          where: { parentServiceId_dependencyName: { parentServiceId: service.id, dependencyName: n.dependencyName } },
+          update: { dependencyType: n.dependencyType, mappedServiceId: n.mappedServiceId, status: n.status, metaJson: n.metaJson || undefined },
+          create: { parentServiceId: service.id, dependencyName: n.dependencyName, dependencyType: n.dependencyType, mappedServiceId: n.mappedServiceId, status: n.status, metaJson: n.metaJson || undefined }
+        });
+      }
+      // delete stale current deps that were not reported this time
+      await prisma.serviceDependencyCurrent.deleteMany({ where: { parentServiceId: service.id, dependencyName: { notIn: names } }});
+    } else {
+      // If no dependencies returned at all, clear existing snapshot for this service
+      await prisma.serviceDependencyCurrent.deleteMany({ where: { parentServiceId: service.id }});
     }
     // Recompute overall status
     const status = normalized.length ? worstStatus(normalized.map(d=>d.status)) : 'UNKNOWN';

@@ -54,3 +54,15 @@ POLL_MAX_SIZE_BYTES=262144
 - [ ] UI graph visualization
 
 See `PRD.md` for full specification.
+
+### Persistent Current Dependencies Snapshot
+The system maintains a snapshot table `ServiceDependencyCurrent` (added after the initial MVP) that stores the most recent successful poll's dependencies for each service. This powers `/services/:id/dependencies` without first querying the latest `PollRun`, improving latency and reducing query complexity.
+
+Manual dependency name -> internal service linkage is handled by `DependencyMappingOverride`. During polling, overrides take precedence over automatic name+environment matching.
+
+Migration steps after pulling these changes:
+```bash
+cd backend
+npm run prisma:migrate
+```
+If the migration hasn't been applied yet, the API endpoint will transparently fall back to deriving dependencies from the last successful `PollRun`.

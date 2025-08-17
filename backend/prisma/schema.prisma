@@ -26,6 +26,11 @@ model Service {
   graphEdgesTo           GraphEdge[] @relation("GraphTo")
   mappedAsDependency     Dependency[] @relation("MappedService")
   dependencyHistories    DependencyHistory[]
+  // Back-relations for overrides & current dependency snapshot
+  overrideParents        DependencyMappingOverride[] @relation("OverrideParent")
+  overrideMapped         DependencyMappingOverride[] @relation("OverrideMappedService")
+  currentDeps            ServiceDependencyCurrent[] @relation("CurrentDepsParent")
+  currentDepsMapped      ServiceDependencyCurrent[] @relation("CurrentDepsMapped")
 
   @@unique([name, environment])
   @@index([name, environment])
@@ -98,7 +103,7 @@ model GraphEdge {
 // This persists across poll runs and is consulted before automatic name-based mapping.
 model DependencyMappingOverride {
   id               String   @id @default(uuid())
-  parentService    Service  @relation(fields: [parentServiceId], references: [id])
+  parentService    Service  @relation("OverrideParent", fields: [parentServiceId], references: [id])
   parentServiceId  String
   dependencyName   String
   mappedService    Service  @relation("OverrideMappedService", fields: [mappedServiceId], references: [id])
@@ -108,4 +113,24 @@ model DependencyMappingOverride {
 
   @@unique([parentServiceId, dependencyName])
   @@index([mappedServiceId])
+}
+
+// Persistent "current view" of a service's dependencies derived from the latest successful
+// poll. This lets us query dependencies without looking up the latest pollRun each time.
+model ServiceDependencyCurrent {
+  id              String   @id @default(uuid())
+  parentService   Service  @relation("CurrentDepsParent", fields: [parentServiceId], references: [id])
+  parentServiceId String
+  dependencyName  String
+  dependencyType  String?
+  mappedService   Service? @relation("CurrentDepsMapped", fields: [mappedServiceId], references: [id])
+  mappedServiceId String?
+  status          String
+  metaJson        String?
+  firstSeenAt     DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@unique([parentServiceId, dependencyName])
+  @@index([mappedServiceId])
+  @@index([parentServiceId])
 }

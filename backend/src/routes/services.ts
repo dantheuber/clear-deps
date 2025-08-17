@@ -58,10 +58,17 @@ export async function servicesRoutes(fastify: FastifyInstance) {
   // Dependencies (latest poll)
   fastify.get('/services/:id/dependencies', async (req, reply) => {
     const { id } = req.params as any;
-    const pollRun = await prisma.pollRun.findFirst({ where: { serviceId: id, success: true }, orderBy: { startedAt: 'desc' }});
-    if (!pollRun) return reply.send([]);
-    const deps = await prisma.dependency.findMany({ where: { pollRunId: pollRun.id }, include: { mappedService: { include: { statusCurrent: true } } }} as any);
-    const transformed = deps.map(d => {
+    // Prefer snapshot table for faster lookups
+    let rows: any[] = [];
+    try {
+      rows = await (prisma as any).serviceDependencyCurrent.findMany({ where: { parentServiceId: id }, include: { mappedService: { include: { statusCurrent: true } } }});
+    } catch {
+      // fallback to previous pollRun logic (e.g., before migration applied)
+      const pollRun = await prisma.pollRun.findFirst({ where: { serviceId: id, success: true }, orderBy: { startedAt: 'desc' }});
+      if (!pollRun) return reply.send([]);
+      rows = await prisma.dependency.findMany({ where: { pollRunId: pollRun.id }, include: { mappedService: { include: { statusCurrent: true } } }} as any);
+    }
+    const transformed = rows.map(d => {
       let meta: any = undefined;
       if (typeof d.metaJson === 'string') { try { meta = JSON.parse(d.metaJson); } catch { meta = undefined; } }
       else if (d.metaJson) meta = d.metaJson;
@@ -104,6 +111,39 @@ export async function servicesRoutes(fastify: FastifyInstance) {
   fastify.delete('/services/:id/dependencies/map/:dependencyName', { preHandler: requireApiKey }, async (req, reply) => {
     const { id, dependencyName } = req.params as any;
     await prisma.dependencyMappingOverride.delete({ where: { parentServiceId_dependencyName: { parentServiceId: id, dependencyName } }}).catch(()=>{});
+    reply.code(204).send();
+  });
+
+  // Delete service (and associated data)
+  fastify.delete('/services/:id', { preHandler: requireApiKey }, async (req, reply) => {
+    const { id } = req.params as any;
+    const svc = await prisma.service.findUnique({ where: { id }, select: { id: true }});
+    if (!svc) return reply.code(404).send({ error: 'not found' });
+    // Gather poll run ids first
+    const pollRuns = await prisma.pollRun.findMany({ where: { serviceId: id }, select: { id: true }});
+    const pollRunIds = pollRuns.map(pr=>pr.id);
+    await prisma.$transaction(async(tx)=>{
+      // Null out mappings pointing to this service (excluding its own dependencies which will be deleted via pollRuns)
+      await tx.dependency.updateMany({ where: { mappedServiceId: id, NOT: { parentServiceId: id } }, data: { mappedServiceId: null }});
+      // Overrides
+      await tx.dependencyMappingOverride.deleteMany({ where: { OR: [ { parentServiceId: id }, { mappedServiceId: id } ] }});
+      // Current dependency snapshots
+      await tx.serviceDependencyCurrent.deleteMany({ where: { OR: [ { parentServiceId: id }, { mappedServiceId: id } ] }});
+      // History
+      await tx.dependencyHistory.deleteMany({ where: { serviceId: id }});
+      // Graph edges
+      await tx.graphEdge.deleteMany({ where: { OR: [ { fromServiceId: id }, { toServiceId: id } ] }});
+      // Dependencies produced by this service's poll runs
+      if (pollRunIds.length) {
+        await tx.dependency.deleteMany({ where: { pollRunId: { in: pollRunIds } }});
+      }
+      // Poll runs
+      await tx.pollRun.deleteMany({ where: { serviceId: id }});
+      // Current status
+      await tx.serviceStatusCurrent.deleteMany({ where: { serviceId: id }});
+      // Finally service
+      await tx.service.delete({ where: { id }});
+    });
     reply.code(204).send();
   });
 

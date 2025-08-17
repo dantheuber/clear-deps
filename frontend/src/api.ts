@@ -54,6 +54,11 @@ export interface DependencyItem {
 export function getService(id: string) { return fetchJSON<ServiceDetail>(`/services/${id}`); }
 export function getServiceDependencies(id: string) { return fetchJSON<DependencyItem[]>(`/services/${id}/dependencies`); }
 
+export async function deleteService(id: string, apiKey: string): Promise<void> {
+  const res = await fetch(`${BASE}/services/${id}`, { method: 'DELETE', headers: { 'x-api-key': apiKey }});
+  if (!res.ok && res.status !== 204) throw new Error(await res.text());
+}
+
 export interface DependencyOverrideRow { dependencyName: string; mappedServiceId: string; mappedServiceName: string; mappedServiceEnvironment: string; }
 export function listDependencyOverrides(serviceId: string) { return fetchJSON<DependencyOverrideRow[]>(`/services/${serviceId}/dependencies/overrides`); }
 export async function upsertDependencyOverride(serviceId: string, dependencyName: string, mappedServiceId: string, apiKey: string) {
