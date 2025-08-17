@@ -53,3 +53,19 @@ export interface DependencyItem {
 
 export function getService(id: string) { return fetchJSON<ServiceDetail>(`/services/${id}`); }
 export function getServiceDependencies(id: string) { return fetchJSON<DependencyItem[]>(`/services/${id}/dependencies`); }
+
+export interface DependencyOverrideRow { dependencyName: string; mappedServiceId: string; mappedServiceName: string; mappedServiceEnvironment: string; }
+export function listDependencyOverrides(serviceId: string) { return fetchJSON<DependencyOverrideRow[]>(`/services/${serviceId}/dependencies/overrides`); }
+export async function upsertDependencyOverride(serviceId: string, dependencyName: string, mappedServiceId: string, apiKey: string) {
+  const res = await fetch(`${BASE}/services/${serviceId}/dependencies/map`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey },
+    body: JSON.stringify({ dependencyName, mappedServiceId })
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+export async function deleteDependencyOverride(serviceId: string, dependencyName: string, apiKey: string) {
+  const res = await fetch(`${BASE}/services/${serviceId}/dependencies/map/${encodeURIComponent(dependencyName)}`, { method: 'DELETE', headers: { 'x-api-key': apiKey }});
+  if (!res.ok && res.status !== 204) throw new Error(await res.text());
+}

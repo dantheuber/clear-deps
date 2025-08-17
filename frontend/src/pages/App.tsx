@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { listServices, getGraph, createService, getService, getServiceDependencies } from '../api';
+import { listServices, getGraph, createService, getService, getServiceDependencies, listDependencyOverrides, upsertDependencyOverride, deleteDependencyOverride } from '../api';
 
 export function App() {
   const servicesQ = useQuery({ queryKey: ['services'], queryFn: listServices, refetchInterval: 10000 });
@@ -95,6 +95,22 @@ function ServiceDetailPanel({ serviceId, onClose }: { serviceId?: string; onClos
   const enabled = !!serviceId;
   const svcQ = useQuery({ queryKey: ['service', serviceId], queryFn: ()=>getService(serviceId!), enabled, refetchInterval: 15000 });
   const depsQ = useQuery({ queryKey: ['service', serviceId, 'deps'], queryFn: ()=>getServiceDependencies(serviceId!), enabled, refetchInterval: 15000 });
+  const overridesQ = useQuery({ queryKey: ['service', serviceId, 'depOverrides'], queryFn: ()=>listDependencyOverrides(serviceId!), enabled, refetchInterval: 20000 });
+  const qc = useQueryClient();
+  const [apiKeyInput, setApiKeyInput] = useState('change-me-dev');
+  const [selectedDepName, setSelectedDepName] = useState<string>('');
+  const [mapToServiceId, setMapToServiceId] = useState<string>('');
+  const upsertMut = useMutation({
+    mutationFn: async () => {
+      if (!selectedDepName || !mapToServiceId) throw new Error('dep + target required');
+      return upsertDependencyOverride(serviceId!, selectedDepName, mapToServiceId, apiKeyInput);
+    },
+    onSuccess: ()=> { qc.invalidateQueries({ queryKey: ['service', serviceId, 'depOverrides']}); qc.invalidateQueries({ queryKey: ['service', serviceId, 'deps']}); }
+  });
+  const deleteMut = useMutation({
+    mutationFn: async (depName: string) => deleteDependencyOverride(serviceId!, depName, apiKeyInput),
+    onSuccess: ()=> { qc.invalidateQueries({ queryKey: ['service', serviceId, 'depOverrides']}); qc.invalidateQueries({ queryKey: ['service', serviceId, 'deps']}); }
+  });
   if (!serviceId) return null;
   return (
     <aside style={{ position: 'fixed', top: 0, right: 0, width: 420, height: '100%', background: '#f8fafc', borderLeft: '1px solid #cbd5e1', padding: 16, overflowY: 'auto', boxShadow: '-4px 0 8px -2px rgba(0,0,0,0.08)' }}>
@@ -128,9 +144,10 @@ function ServiceDetailPanel({ serviceId, onClose }: { serviceId?: string; onClos
             <tbody>
               {depsQ.data.map(d => (
                 <tr key={d.id} style={{ borderBottom: '1px solid #e2e8f0' }}>
-                  <td style={{ padding: '2px 4px' }}>
+                  <td style={{ padding: '2px 4px', cursor: 'pointer' }} onClick={()=> setSelectedDepName(d.name)}>
                     {d.mappedServiceId ? <strong>{d.name}</strong> : d.name}
                     {d.mappedServiceStatus && <span style={{ marginLeft: 4 }}><StatusPill status={d.mappedServiceStatus} /></span>}
+                    {selectedDepName === d.name && <span style={{ marginLeft: 4, color: '#2563eb' }}>selected</span>}
                   </td>
                   <td style={{ padding: '2px 4px' }}><StatusPill status={d.status} /></td>
                   <td style={{ padding: '2px 4px', color: '#64748b' }}>{d.type || '-'}</td>
@@ -139,6 +156,37 @@ function ServiceDetailPanel({ serviceId, onClose }: { serviceId?: string; onClos
             </tbody>
           </table>
         )}
+        <div style={{ marginTop: 12, background: '#fff', padding: 8, border: '1px solid #e2e8f0', borderRadius: 4 }}>
+          <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 4 }}>Manual Mapping</div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <label style={{ display: 'flex', flexDirection: 'column', fontSize: 10, textTransform: 'uppercase', gap: 2 }}>API Key
+              <input value={apiKeyInput} onChange={e=>setApiKeyInput(e.target.value)} style={inputStyle} />
+            </label>
+            <label style={{ display: 'flex', flexDirection: 'column', fontSize: 10, textTransform: 'uppercase', gap: 2 }}>Dependency Name
+              <input value={selectedDepName} onChange={e=>setSelectedDepName(e.target.value)} placeholder='external-service' style={inputStyle} />
+            </label>
+            <label style={{ display: 'flex', flexDirection: 'column', fontSize: 10, textTransform: 'uppercase', gap: 2 }}>Map To Service ID
+              <input value={mapToServiceId} onChange={e=>setMapToServiceId(e.target.value)} placeholder='target service id' style={inputStyle} />
+            </label>
+            <div>
+              <button disabled={upsertMut.isPending} onClick={()=>upsertMut.mutate()} style={buttonStyle}>{upsertMut.isPending ? 'Saving...' : 'Save Mapping'}</button>
+              {upsertMut.isError && <span style={{ color: '#dc2626', marginLeft: 6 }}>Err</span>}
+              {upsertMut.isSuccess && <span style={{ color: '#16a34a', marginLeft: 6 }}>Saved</span>}
+            </div>
+            <div style={{ fontSize: 11, color: '#475569' }}>Overrides:</div>
+            {overridesQ.data && overridesQ.data.length === 0 && <div style={{ fontSize: 11 }}>None</div>}
+            {overridesQ.data && overridesQ.data.length > 0 && (
+              <ul style={{ listStyle: 'none', padding: 0, margin: 0, display: 'flex', flexDirection: 'column', gap: 4 }}>
+                {overridesQ.data.map(o => (
+                  <li key={o.dependencyName} style={{ background: '#f1f5f9', padding: '4px 6px', borderRadius: 4, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <span><code>{o.dependencyName}</code> → <strong>{o.mappedServiceName}</strong></span>
+                    <button onClick={()=>deleteMut.mutate(o.dependencyName)} style={{ background: 'transparent', border: 'none', color: '#dc2626', cursor: 'pointer', fontSize: 12 }}>✕</button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        </div>
       </div>
     </aside>
   );

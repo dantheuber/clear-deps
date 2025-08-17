@@ -80,6 +80,40 @@ export async function servicesRoutes(fastify: FastifyInstance) {
     reply.send(transformed);
   });
 
+  // Create/update a manual dependency mapping override
+  fastify.post('/services/:id/dependencies/map', { preHandler: requireApiKey }, async (req, reply) => {
+    const { id } = req.params as any;
+    const body = req.body as any;
+    const schema = z.object({ dependencyName: z.string().min(1), mappedServiceId: z.string().uuid() });
+    const parsed = schema.parse(body);
+    // Validate parent & mapped service exist
+    const parent = await prisma.service.findUnique({ where: { id }});
+    if (!parent) return reply.code(404).send({ error: 'parent service not found' });
+    const mapped = await prisma.service.findUnique({ where: { id: parsed.mappedServiceId }});
+    if (!mapped) return reply.code(400).send({ error: 'mapped service not found' });
+    // Upsert override
+    const override = await prisma.dependencyMappingOverride.upsert({
+      where: { parentServiceId_dependencyName: { parentServiceId: id, dependencyName: parsed.dependencyName } },
+      update: { mappedServiceId: parsed.mappedServiceId },
+      create: { parentServiceId: id, dependencyName: parsed.dependencyName, mappedServiceId: parsed.mappedServiceId }
+    });
+    reply.code(201).send(override);
+  });
+
+  // Delete a manual mapping override
+  fastify.delete('/services/:id/dependencies/map/:dependencyName', { preHandler: requireApiKey }, async (req, reply) => {
+    const { id, dependencyName } = req.params as any;
+    await prisma.dependencyMappingOverride.delete({ where: { parentServiceId_dependencyName: { parentServiceId: id, dependencyName } }}).catch(()=>{});
+    reply.code(204).send();
+  });
+
+  // List overrides for a service
+  fastify.get('/services/:id/dependencies/overrides', async (req, reply) => {
+    const { id } = req.params as any;
+    const rows = await prisma.dependencyMappingOverride.findMany({ where: { parentServiceId: id }, include: { mappedService: { select: { id: true, name: true, environment: true } } }} as any);
+    reply.send(rows.map(r=>({ dependencyName: r.dependencyName, mappedServiceId: r.mappedServiceId, mappedServiceName: (r as any).mappedService.name, mappedServiceEnvironment: (r as any).mappedService.environment })));
+  });
+
   // On-demand refresh
   fastify.post('/services/:id/refresh', { preHandler: requireApiKey }, async (req, reply) => {
     const { id } = req.params as any;

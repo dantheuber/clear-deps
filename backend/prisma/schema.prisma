@@ -92,3 +92,20 @@ model GraphEdge {
   @@index([fromServiceId])
   @@index([toServiceId])
 }
+
+// Manual overrides allowing a specific dependencyName reported by a parent service
+// to be explicitly mapped to a (possibly differently named) internal service.
+// This persists across poll runs and is consulted before automatic name-based mapping.
+model DependencyMappingOverride {
+  id               String   @id @default(uuid())
+  parentService    Service  @relation(fields: [parentServiceId], references: [id])
+  parentServiceId  String
+  dependencyName   String
+  mappedService    Service  @relation("OverrideMappedService", fields: [mappedServiceId], references: [id])
+  mappedServiceId  String
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@unique([parentServiceId, dependencyName])
+  @@index([mappedServiceId])
+}

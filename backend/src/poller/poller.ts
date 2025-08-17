@@ -93,8 +93,15 @@ export async function pollService(serviceId: string, logger: any) {
       }
       const name = (d as any).name || (d as any).service || (d as any).id;
       if (!name) continue;
-      // attempt internal mapping by name+env (case-insensitive match attempt)
-      const mapped = await prisma.service.findFirst({ where: { name: name, environment: service.environment }});
+      // Check manual override first
+      const override = await prisma.dependencyMappingOverride.findUnique({ where: { parentServiceId_dependencyName: { parentServiceId: service.id, dependencyName: name } }}).catch(()=>null);
+      let mapped = undefined as any;
+      if (override) {
+        mapped = await prisma.service.findUnique({ where: { id: override.mappedServiceId }});
+      } else {
+        // attempt internal mapping by exact name+env
+        mapped = await prisma.service.findFirst({ where: { name: name, environment: service.environment }});
+      }
       let metaStr: string | null = null;
       if ((d as any).meta !== undefined) {
         try { metaStr = JSON.stringify((d as any).meta); } catch { metaStr = null; }

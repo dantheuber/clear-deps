@@ -1,0 +1,8 @@
+{
+  "name": "clear-deps-monorepo",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node ./dev-all.mjs"
+  }
+}
