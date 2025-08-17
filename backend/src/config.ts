@@ -25,3 +25,9 @@ export function normalizeStatus(input?: string | null): string {
   if (['unknown','missing'].includes(v)) return 'UNKNOWN';
   return 'UNKNOWN';
 }
+
+export function statusFromHealthyFlag(healthy: any): string | undefined {
+  if (healthy === true) return 'OK';
+  if (healthy === false) return 'ERROR';
+  return undefined;
+}

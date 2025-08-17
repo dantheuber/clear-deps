@@ -1,9 +1,16 @@
 import { prisma } from '../db.js';
-import { config, normalizeStatus, worstStatus } from '../config.js';
+import { config, normalizeStatus, worstStatus, statusFromHealthyFlag } from '../config.js';
 
 interface ProactiveDepsPayload {
   service?: string;
   dependencies?: Array<{ name: string; type?: string; status?: string; meta?: any }>; 
+}
+
+// Lightweight debug logger (enabled via DEBUG_POLLER env var)
+function fastDebug(logger: any, event: string, data: Record<string, any>) {
+  if (process.env.DEBUG_POLLER) {
+    logger.info({ evt: event, ...data });
+  }
 }
 
 let running = false;
@@ -14,8 +21,8 @@ export async function pollDueServices(logger: any) {
   try {
     const now = new Date();
     // naive selection: services whose lastPolledAt older than interval
-  const services = await prisma.service.findMany();
-  const due = services.filter((s: any) => {
+    const services = await prisma.service.findMany();
+    const due = services.filter((s: any) => {
       const interval = s.pollIntervalOverrideSec ?? config.defaultPollIntervalSec;
       if (!s.lastPolledAt) return true;
       return (now.getTime() - s.lastPolledAt.getTime()) / 1000 >= interval;
@@ -37,24 +44,65 @@ export async function pollService(serviceId: string, logger: any) {
   try {
     const controller = new AbortController();
     const to = setTimeout(()=>controller.abort(), config.pollTimeoutMs);
+    const fetchStart = Date.now();
+    fastDebug(logger, 'poll.fetch.begin', { serviceId: service.id, url: service.endpointUrl });
     const res = await fetch(service.endpointUrl, { signal: controller.signal, headers: { 'accept':'application/json' } });
     clearTimeout(to);
     const httpStatus = res.status;
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const fetchDurationMs = Date.now() - fetchStart;
+    if (!res.ok) {
+      fastDebug(logger, 'poll.fetch.non_ok', { serviceId: service.id, httpStatus });
+      throw new Error(`HTTP ${res.status}`);
+    }
     const buf = await res.arrayBuffer();
+    const byteLength = buf.byteLength;
     if (buf.byteLength > config.pollMaxSizeBytes) throw new Error('payload too large');
     const text = Buffer.from(buf).toString('utf8');
-    const json = JSON.parse(text) as ProactiveDepsPayload;
-    const deps = json.dependencies || [];
+    let json: any;
+    try {
+      json = JSON.parse(text);
+    } catch (e: any) {
+      logger.warn({ serviceId: service.id, err: e.message, snippet: text.slice(0,300) }, 'poll json parse error');
+      throw new Error('invalid json');
+    }
+    // Determine dependency list shape
+    let deps: Array<{ name: string; type?: string; status?: string; meta?: any }> = [];
+    let parseMode = 'object.dependencies';
+    if (Array.isArray(json)) {
+      deps = json as any;
+      parseMode = 'array_root';
+    } else if (Array.isArray(json.dependencies)) {
+      deps = json.dependencies as any;
+    } else if (Array.isArray((json as any).deps)) { // alternate key fallback
+      deps = (json as any).deps as any;
+      parseMode = 'object.deps';
+    } else {
+      parseMode = 'no_deps_found';
+    }
+    fastDebug(logger, 'poll.payload.parsed', { serviceId: service.id, httpStatus, bytes: byteLength, fetchMs: fetchDurationMs, parseMode, depsCount: deps.length });
     const pollRun = await prisma.pollRun.create({ data: { serviceId: service.id, success: true, httpStatus, durationMs: Date.now()-start }});
     pollRunId = pollRun.id;
     // Insert dependencies
     const normalized = [] as any[];
     for (const d of deps) {
-      const status = normalizeStatus(d.status);
-      // attempt internal mapping by name+env
-      const mapped = await prisma.service.findFirst({ where: { name: d.name, environment: service.environment }});
-      normalized.push({ pollRunId: pollRun.id, parentServiceId: service.id, dependencyName: d.name, dependencyType: d.type || 'unknown', mappedServiceId: mapped?.id, status, metaJson: d.meta || null });
+      if (!d || typeof d !== 'object') continue;
+      const rawHealthy = (d as any).healthy;
+      let status = statusFromHealthyFlag(rawHealthy);
+      if (!status) {
+        status = normalizeStatus((d as any).status);
+      }
+      const name = (d as any).name || (d as any).service || (d as any).id;
+      if (!name) continue;
+      // attempt internal mapping by name+env (case-insensitive match attempt)
+      const mapped = await prisma.service.findFirst({ where: { name: name, environment: service.environment }});
+      let metaStr: string | null = null;
+      if ((d as any).meta !== undefined) {
+        try { metaStr = JSON.stringify((d as any).meta); } catch { metaStr = null; }
+      }
+  normalized.push({ pollRunId: pollRun.id, parentServiceId: service.id, dependencyName: name, dependencyType: (d as any).type || 'unknown', mappedServiceId: mapped?.id, status, metaJson: metaStr });
+    }
+    if (normalized.length === 0 && deps.length > 0) {
+      fastDebug(logger, 'poll.deps.filtered_all_out', { serviceId: service.id, rawDepsCount: deps.length });
     }
     if (normalized.length) {
       await prisma.dependency.createMany({ data: normalized });
