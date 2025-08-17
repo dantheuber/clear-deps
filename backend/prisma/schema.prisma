@@ -1,0 +1,94 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Service {
+  id                     String    @id @default(uuid())
+  name                   String
+  environment            String    @default("default")
+  endpointUrl            String
+  tagsJson               String? // JSON string
+  owner                  String?
+  pollIntervalOverrideSec Int?
+  createdAt              DateTime  @default(now())
+  updatedAt              DateTime  @updatedAt
+  lastPolledAt           DateTime?
+  consecutiveFailures    Int       @default(0)
+  pollRuns               PollRun[]
+  dependencies           Dependency[] @relation("ServiceDependencies")
+  statusCurrent          ServiceStatusCurrent?
+  graphEdgesFrom         GraphEdge[] @relation("GraphFrom")
+  graphEdgesTo           GraphEdge[] @relation("GraphTo")
+  mappedAsDependency     Dependency[] @relation("MappedService")
+  dependencyHistories    DependencyHistory[]
+
+  @@unique([name, environment])
+  @@index([name, environment])
+}
+
+model PollRun {
+  id          String      @id @default(uuid())
+  service     Service     @relation(fields: [serviceId], references: [id])
+  serviceId   String
+  startedAt   DateTime    @default(now())
+  finishedAt  DateTime?
+  success     Boolean
+  httpStatus  Int?
+  durationMs  Int?
+  errorMessage String?
+  dependencies Dependency[]
+}
+
+model Dependency {
+  id               String    @id @default(uuid())
+  pollRun          PollRun   @relation(fields: [pollRunId], references: [id])
+  pollRunId        String
+  parentService    Service   @relation("ServiceDependencies", fields: [parentServiceId], references: [id])
+  parentServiceId  String
+  dependencyName   String
+  dependencyType   String?
+  mappedService    Service?  @relation("MappedService", fields: [mappedServiceId], references: [id])
+  mappedServiceId  String?
+  status           String
+  metaJson         String? // JSON string
+  createdAt        DateTime  @default(now())
+
+  @@index([parentServiceId, dependencyName])
+}
+
+model ServiceStatusCurrent {
+  service       Service  @relation(fields: [serviceId], references: [id])
+  serviceId     String   @id
+  overallStatus String
+  updatedAt     DateTime @default(now())
+}
+
+model DependencyHistory {
+  id             String   @id @default(uuid())
+  service        Service  @relation(fields: [serviceId], references: [id])
+  serviceId      String
+  dependencyName String
+  timestamp      DateTime @default(now())
+  status         String
+
+  @@index([serviceId, dependencyName, timestamp])
+}
+
+model GraphEdge {
+  id              String   @id @default(uuid())
+  fromService     Service  @relation("GraphFrom", fields: [fromServiceId], references: [id])
+  fromServiceId   String
+  toService       Service? @relation("GraphTo", fields: [toServiceId], references: [id])
+  toServiceId     String?
+  dependencyName  String
+  status          String
+  updatedAt       DateTime @default(now())
+
+  @@index([fromServiceId])
+  @@index([toServiceId])
+}
