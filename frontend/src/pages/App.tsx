@@ -240,6 +240,9 @@ function GraphVis({ data, selectedId, onSelectService }: { data: GraphData; sele
   const dragRef = useRef<{ node?: any; mode?: 'pan' | 'node'; startX: number; startY: number; origTx: number; origTy: number; moved: boolean }>({ startX:0, startY:0, origTx:0, origTy:0, moved:false });
   // selected node ref so tick handler always sees current selection
   const selectedIdRef = useRef<string | undefined>(selectedId);
+  // live data ref for status/color updates without tearing down simulation
+  const dataRef = useRef<GraphData>(data);
+  useEffect(()=>{ dataRef.current = data; }, [data]);
   useEffect(()=>{ selectedIdRef.current = selectedId; if (simRef.current) { simRef.current.alpha(0.05).restart(); } else { // if no sim yet trigger a manual redraw by resizing
     setDims(d=>({...d}));
   } }, [selectedId]);
@@ -288,17 +291,30 @@ function GraphVis({ data, selectedId, onSelectService }: { data: GraphData; sele
     function statusColor(status: string) {
       return status === 'OK' ? '#16a34a' : status === 'WARN' ? '#f59e0b' : status === 'ERROR' ? '#dc2626' : '#64748b';
     }
+    function boundaryDistance(node: any, ux: number, uy: number) {
+      // distance from center to boundary along direction (ux,uy)
+      if (node.external) {
+        const r = 20; // external circle radius
+        return r;
+      } else {
+        const halfW = 36; // internal square half width (square width 72)
+        const halfH = 22; // internal square half height (height 44)
+        const tx = halfW / (Math.abs(ux) || 1e-6);
+        const ty = halfH / (Math.abs(uy) || 1e-6);
+        return Math.min(tx, ty);
+      }
+    }
     function drawArrow(from: any, to: any, color: string) {
       if (!ctx) return { mx: from.x, my: from.y };
-      const rFrom = from.external ? 18 : 28;
-      const rTo = to.external ? 18 : 28;
       const dx = to.x - from.x; const dy = to.y - from.y;
       const dist = Math.sqrt(dx*dx + dy*dy) || 1;
       const ux = dx / dist; const uy = dy / dist;
-      const startX = from.x + ux * rFrom;
-      const startY = from.y + uy * rFrom;
-      const endX = to.x - ux * (rTo + 6); // leave room for arrowhead
-      const endY = to.y - uy * (rTo + 6);
+      const startPad = boundaryDistance(from, ux, uy);
+      const endPad = boundaryDistance(to, -ux, -uy) + 6; // gap + arrowhead space
+      const startX = from.x + ux * startPad;
+      const startY = from.y + uy * startPad;
+      const endX = to.x - ux * endPad;
+      const endY = to.y - uy * endPad;
       // respect caller's lineWidth & globalAlpha; only set strokeStyle
       ctx.strokeStyle = color;
       ctx.beginPath(); ctx.moveTo(startX, startY); ctx.lineTo(endX, endY); ctx.stroke();
@@ -324,6 +340,21 @@ function GraphVis({ data, selectedId, onSelectService }: { data: GraphData; sele
       // apply pan/zoom
       const { scale, tx, ty } = transformRef.current;
       ctx.setTransform(scale,0,0,scale,tx,ty);
+      // sync dynamic status changes without rebuilding simulation
+      const latest = dataRef.current;
+      if (latest) {
+        const statusMap = new Map<string,string>();
+        for (const n of latest.nodes) statusMap.set(n.id, n.status);
+        for (const n of nodes) if (statusMap.has(n.id)) n.status = statusMap.get(n.id);
+        const edgeStatusKey = new Map<string,string>();
+        for (const e of latest.edges) edgeStatusKey.set(`${e.from}|${e.to}|${e.name}`, e.status);
+        for (const l of links) {
+          const sId = (l.source && l.source.id)? l.source.id : l.source;
+          const tId = (l.target && l.target.id)? l.target.id : l.target;
+          const key = `${sId}|${tId}|${l.name}`;
+          if (edgeStatusKey.has(key)) l.status = edgeStatusKey.get(key);
+        }
+      }
       // compute upstream highlight chain for selectedId (dependencies that lead to selected service)
       let highlightEdgeSet: Set<any> | null = null;
       let highlightNodeSet: Set<string> | null = null;
@@ -442,32 +473,39 @@ function GraphVis({ data, selectedId, onSelectService }: { data: GraphData; sele
       }
       // Nodes
       for (const n of nodes) {
-        const r = n.external ? 18 : 28;
-        // background circle with status ring
-        ctx.beginPath();
         const inHighlight = highlightNodeSet ? highlightNodeSet.has(n.id) : false;
-        ctx.fillStyle = inHighlight ? '#f0f9ff' : '#ffffff';
+        const strokeW = inHighlight ? 4 : 3;
+        ctx.lineWidth = strokeW;
         ctx.strokeStyle = statusColor(n.status);
-        ctx.lineWidth = inHighlight ? 4 : 3;
-        ctx.arc(n.x, n.y, r, 0, Math.PI*2);
-        ctx.fill();
-        ctx.stroke();
-        // name label (screen space, non-scaled for readability)
+        ctx.fillStyle = inHighlight ? '#f0f9ff' : '#ffffff';
+        if (n.external) {
+          // circle for external dependency
+            ctx.beginPath();
+            const r = 20;
+            ctx.arc(n.x, n.y, r, 0, Math.PI*2);
+            ctx.fill();
+            ctx.stroke();
+        } else {
+          // square for internal service
+          const halfW = 36; const halfH = 22;
+          ctx.beginPath();
+          ctx.rect(n.x - halfW, n.y - halfH, halfW*2, halfH*2);
+          ctx.fill();
+          ctx.stroke();
+        }
+        // label inside shape (screen-space so it's stable vs zoom)
         ctx.save();
         ctx.setTransform(1,0,0,1,0,0);
         const { scale, tx, ty } = transformRef.current;
         const sx = n.x * scale + tx; const sy = n.y * scale + ty;
-        ctx.font = '12px system-ui';
+        ctx.font = '11px system-ui';
         ctx.fillStyle = '#0f172a';
         ctx.textAlign = 'center';
-        const label = n.name.length > 16 ? n.name.slice(0,14)+'…' : n.name;
-        ctx.fillText(label, sx, sy - (r*scale) - 6);
-        ctx.restore();
-        // status bar inside
-        ctx.save();
-        ctx.setTransform(scale,0,0,scale,tx,ty);
-        ctx.fillStyle = statusColor(n.status);
-        ctx.fillRect(n.x - r/2, n.y + r + 4/scale, r, 5/scale);
+        ctx.textBaseline = 'middle';
+        const maxLen = n.external ? 14 : 18;
+        let label = n.name;
+        if (label.length > maxLen) label = label.slice(0, maxLen-1) + '…';
+        ctx.fillText(label, sx, sy);
         ctx.restore();
       }
     });
