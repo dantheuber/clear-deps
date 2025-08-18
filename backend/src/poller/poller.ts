@@ -65,19 +65,36 @@ export async function pollService(serviceId: string, logger: any) {
       logger.warn({ serviceId: service.id, err: e.message, snippet: text.slice(0,300) }, 'poll json parse error');
       throw new Error('invalid json');
     }
-    // Determine dependency list shape
+    // Determine dependency list shape (support custom dependencyKey on service)
     let deps: Array<{ name: string; type?: string; status?: string; meta?: any }> = [];
-    let parseMode = 'object.dependencies';
-    if (Array.isArray(json)) {
-      deps = json as any;
-      parseMode = 'array_root';
-    } else if (Array.isArray(json.dependencies)) {
-      deps = json.dependencies as any;
-    } else if (Array.isArray((json as any).deps)) { // alternate key fallback
-      deps = (json as any).deps as any;
-      parseMode = 'object.deps';
-    } else {
-      parseMode = 'no_deps_found';
+    let parseMode = 'detected';
+    const dependencyKey: string | undefined = (service as any).dependencyKey || undefined;
+    function coerceArray(val: any): any[] | undefined {
+      if (!val) return undefined;
+      if (Array.isArray(val)) return val;
+      // if object with dependencies / deps property
+      if (Array.isArray(val.dependencies)) return val.dependencies;
+      if (Array.isArray(val.deps)) return val.deps;
+      return undefined;
+    }
+    if (dependencyKey && !Array.isArray(json)) {
+      const inner = (json as any)[dependencyKey];
+      const arr = coerceArray(inner);
+      if (arr) {
+        deps = arr as any;
+        parseMode = 'dependencyKey:' + dependencyKey;
+      }
+    }
+    if (deps.length === 0) {
+      if (Array.isArray(json)) {
+        deps = json as any; parseMode = 'array_root';
+      } else if (Array.isArray((json as any).dependencies)) {
+        deps = (json as any).dependencies as any; parseMode = 'object.dependencies';
+      } else if (Array.isArray((json as any).deps)) {
+        deps = (json as any).deps as any; parseMode = 'object.deps';
+      } else {
+        parseMode = 'no_deps_found';
+      }
     }
     fastDebug(logger, 'poll.payload.parsed', { serviceId: service.id, httpStatus, bytes: byteLength, fetchMs: fetchDurationMs, parseMode, depsCount: deps.length });
     const pollRun = await prisma.pollRun.create({ data: { serviceId: service.id, success: true, httpStatus, durationMs: Date.now()-start }});

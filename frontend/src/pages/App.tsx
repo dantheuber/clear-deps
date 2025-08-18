@@ -7,15 +7,17 @@ export function App() {
   const graphQ = useQuery({ queryKey: ['graph'], queryFn: getGraph, refetchInterval: 15000 });
   const qc = useQueryClient();
   const [apiKey, setApiKey] = useState('change-me-dev');
-  const [form, setForm] = useState({ name: '', environment: 'default', endpointUrl: '' });
+  const [form, setForm] = useState({ name: '', environment: 'default', endpointUrl: '', dependencyKey: '' });
   const [selectedServiceId, setSelectedServiceId] = useState<string | undefined>();
   const createMut = useMutation({
     mutationFn: async () => {
-      if (!form.name || !form.endpointUrl) throw new Error('name and endpointUrl required');
-      return createService(form, apiKey);
+  if (!form.name || !form.endpointUrl) throw new Error('name and endpointUrl required');
+  const payload: any = { ...form };
+  if (!payload.dependencyKey) delete payload.dependencyKey; // omit empty
+  return createService(payload, apiKey);
     },
     onSuccess: () => {
-      setForm({ name: '', environment: 'default', endpointUrl: '' });
+  setForm({ name: '', environment: 'default', endpointUrl: '', dependencyKey: '' });
       qc.invalidateQueries({ queryKey: ['services'] });
     }
   });
@@ -39,6 +41,9 @@ export function App() {
             </label>
             <label style={labelStyle}>Endpoint URL
               <input value={form.endpointUrl} onChange={e=>setForm(f=>({...f, endpointUrl: e.target.value}))} placeholder="https://service.local/proactive-deps" style={inputStyle} />
+            </label>
+            <label style={labelStyle}>Dependency Key
+              <input value={form.dependencyKey} onChange={e=>setForm(f=>({...f, dependencyKey: e.target.value}))} placeholder="dependencies (optional)" style={inputStyle} />
             </label>
             <div>
               <button onClick={()=>createMut.mutate()} disabled={createMut.isPending} style={buttonStyle}>
@@ -227,7 +232,7 @@ function ServiceDetailPanel({ serviceId, allServices, onClose }: { serviceId?: s
 // --- Graph Visualization ---
 import { forceSimulation, forceLink, forceManyBody, forceCenter, forceCollide } from 'd3-force';
 
-interface GraphData { nodes: Array<{ id: string; name: string; status: string; environment?: string | null; external?: boolean }>; edges: Array<{ from: string; to: string; name: string; status: string; latencyMs?: number }>; }
+interface GraphData { nodes: Array<{ id: string; name: string; status: string; environment?: string | null; external?: boolean; depth?: number }>; edges: Array<{ from: string; to: string; name: string; status: string; latencyMs?: number }>; }
 
 function GraphVis({ data, selectedId, onSelectService }: { data: GraphData; selectedId?: string; onSelectService: (id: string)=>void }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -255,22 +260,38 @@ function GraphVis({ data, selectedId, onSelectService }: { data: GraphData; sele
     if (!canvasRef.current) return;
     const ctx = canvasRef.current.getContext('2d');
     if (!ctx) return;
+  const layerGap = 150; // increased vertical gap per depth
     // Capture previous node positions & fixed states
     const prevMap = new Map<string, any>();
     for (const pn of nodesRef.current) {
       prevMap.set(pn.id, { x: pn.x, y: pn.y, vx: pn.vx, vy: pn.vy, fx: pn.fx, fy: pn.fy });
     }
+    // prepare font for measuring
+    const measureCtx = ctx;
+    measureCtx.font = '11px system-ui';
     const nodes: any[] = data.nodes.map(n=>{
       const base: any = { ...n };
       const prev = prevMap.get(n.id);
       if (prev) {
         base.x = prev.x; base.y = prev.y;
-        // carry over velocity for smooth transition
         if (typeof prev.vx === 'number') base.vx = prev.vx;
         if (typeof prev.vy === 'number') base.vy = prev.vy;
         if (prev.fx !== undefined) base.fx = prev.fx;
         if (prev.fy !== undefined) base.fy = prev.fy;
       }
+      const d = typeof n.depth === 'number' ? n.depth : 0;
+      const targetY = d * layerGap + 40;
+      if (!prev) base.y = targetY + (Math.random()*10 - 5);
+      base.fy = targetY;
+      base._depth = d;
+      // dynamic sizing
+  const paddingX = 16;
+  const minW = 72;
+  // Width exactly sized to full label (no truncation) with left/right padding
+  let w = measureCtx.measureText(n.name).width + paddingX;
+  if (w < minW) w = minW;
+  base._w = w; base._h = 44;
+  base._label = n.name; // store full label
       return base;
     });
   const links: any[] = data.edges.map(e=>({ source: e.from, target: e.to, name: e.name, status: e.status, latencyMs: e.latencyMs, _key: `${e.to}<-${e.from}::${e.name}` }));
@@ -279,10 +300,10 @@ function GraphVis({ data, selectedId, onSelectService }: { data: GraphData; sele
     // stop previous sim if exists
     if (simRef.current) simRef.current.stop();
     const sim = forceSimulation(nodes)
-      .force('link', forceLink(links).id((d: any)=>d.id).distance(()=>160).strength(0.55))
-      .force('charge', forceManyBody().strength(-400))
+      .force('link', forceLink(links).id((d: any)=>d.id).distance(()=>200).strength(0.65))
+      .force('charge', forceManyBody().strength(-900))
       .force('center', forceCenter(dims.w/2, dims.h/2))
-      .force('collide', forceCollide().radius(70));
+      .force('collide', forceCollide().radius((d: any)=> d.external ? 40 : (d._w/2 + 28)).strength(0.95));
     // If there were previous positions, start with lower alpha to avoid drastic movement
     if (prevMap.size > 0) {
       sim.alpha(0.4);
@@ -294,15 +315,13 @@ function GraphVis({ data, selectedId, onSelectService }: { data: GraphData; sele
     function boundaryDistance(node: any, ux: number, uy: number) {
       // distance from center to boundary along direction (ux,uy)
       if (node.external) {
-        const r = 20; // external circle radius
-        return r;
-      } else {
-        const halfW = 36; // internal square half width (square width 72)
-        const halfH = 22; // internal square half height (height 44)
-        const tx = halfW / (Math.abs(ux) || 1e-6);
-        const ty = halfH / (Math.abs(uy) || 1e-6);
-        return Math.min(tx, ty);
+        return 20; // external circle radius
       }
+      const halfW = node._w ? node._w/2 : 36;
+      const halfH = node._h ? node._h/2 : 22;
+      const tx = halfW / (Math.abs(ux) || 1e-6);
+      const ty = halfH / (Math.abs(uy) || 1e-6);
+      return Math.min(tx, ty);
     }
     function drawArrow(from: any, to: any, color: string) {
       if (!ctx) return { mx: from.x, my: from.y };
@@ -360,49 +379,29 @@ function GraphVis({ data, selectedId, onSelectService }: { data: GraphData; sele
       let highlightNodeSet: Set<string> | null = null;
       const selId = selectedIdRef.current;
       if (selId) {
-        // Determine orientation: are links stored provider->dependent or dependent->provider?
-        // We'll sample edges involving the selected node.
-        let anyTargetMatches = false; let anySourceMatches = false;
-        for (const l of links) {
-          const sId = (l.source && l.source.id) ? l.source.id : l.source;
-          const tId = (l.target && l.target.id) ? l.target.id : l.target;
-          if (tId === selId) anyTargetMatches = true;
-          if (sId === selId) anySourceMatches = true;
-          if (anyTargetMatches && anySourceMatches) break;
-        }
-        const orientation: 'providerDependent' | 'dependentProvider' | 'unknown' = anyTargetMatches && !anySourceMatches ? 'providerDependent' : (!anyTargetMatches && anySourceMatches ? 'dependentProvider' : (anyTargetMatches ? 'providerDependent' : 'unknown'));
+        // Graph storage: source = consumer, target = provider.
+        // Upstream providers for a selected service are found by traversing outward along
+        // edges whose source == current (i.e. dependencies it declares), then repeating from each provider.
         const queue: string[] = [selId];
         const visited = new Set<string>([selId]);
         const edgesUp = new Set<any>();
         const nodesUp = new Set<string>([selId]);
-        while (queue.length) {
+        let guard = 0;
+        while (queue.length && guard < links.length * 10) {
+          guard++;
           const current = queue.shift()!;
           for (const l of links) {
             const sId = (l.source && l.source.id) ? l.source.id : l.source;
-            const tId = (l.target && l.target.id) ? l.target.id : l.target;
-            if (orientation === 'providerDependent') {
-              // provider->dependent, so find edges whose dependent == current, move to provider
-              if (tId === current) {
-                const providerId = sId;
-                if (!visited.has(providerId)) { visited.add(providerId); queue.push(providerId); }
-                edgesUp.add(l); nodesUp.add(providerId);
-              }
-            } else if (orientation === 'dependentProvider') {
-              // dependent->provider (inverted storage). Providers are target side.
-              if (sId === current) {
-                const providerId = tId;
-                if (!visited.has(providerId)) { visited.add(providerId); queue.push(providerId); }
-                edgesUp.add(l); nodesUp.add(providerId);
-              }
-            } else {
-              // unknown orientation; skip
+            const tId = (l.target && l.target.id) ? l.target.id : l.target; // provider
+            if (sId === current) {
+              // highlight this consumer->provider edge and traverse to provider
+              if (!visited.has(tId)) { visited.add(tId); queue.push(tId); }
+              edgesUp.add(l); nodesUp.add(tId);
             }
           }
         }
-        if (edgesUp.size > 0) {
-          highlightEdgeSet = edgesUp;
-          highlightNodeSet = nodesUp;
-        }
+        highlightEdgeSet = edgesUp;
+        highlightNodeSet = nodesUp;
       }
       // Edges first
       for (const l of links) {
@@ -486,8 +485,7 @@ function GraphVis({ data, selectedId, onSelectService }: { data: GraphData; sele
             ctx.fill();
             ctx.stroke();
         } else {
-          // square for internal service
-          const halfW = 36; const halfH = 22;
+          const halfW = n._w ? n._w/2 : 36; const halfH = n._h ? n._h/2 : 22;
           ctx.beginPath();
           ctx.rect(n.x - halfW, n.y - halfH, halfW*2, halfH*2);
           ctx.fill();
@@ -502,10 +500,8 @@ function GraphVis({ data, selectedId, onSelectService }: { data: GraphData; sele
         ctx.fillStyle = '#0f172a';
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
-        const maxLen = n.external ? 14 : 18;
-        let label = n.name;
-        if (label.length > maxLen) label = label.slice(0, maxLen-1) + '…';
-        ctx.fillText(label, sx, sy);
+  const label = n._label || n.name;
+  ctx.fillText(label, sx, sy);
         ctx.restore();
       }
     });

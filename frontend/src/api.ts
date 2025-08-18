@@ -17,6 +17,7 @@ export interface CreateServiceInput {
   endpointUrl: string;
   environment?: string;
   pollIntervalOverrideSec?: number;
+  dependencyKey?: string; // optional key name inside JSON where dependency array resides
 }
 
 export async function createService(input: CreateServiceInput, apiKey: string): Promise<ServiceSummary> {
@@ -37,6 +38,7 @@ export interface ServiceDetail extends ServiceSummary {
   pollIntervalOverrideSec?: number;
   createdAt: string;
   tags?: Record<string, string>;
+  dependencyKey?: string;
 }
 
 export interface DependencyItem {

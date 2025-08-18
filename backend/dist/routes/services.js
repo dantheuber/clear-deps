@@ -6,6 +6,7 @@ const ServiceCreate = z.object({
     name: z.string().min(1),
     environment: z.string().default('default'),
     endpointUrl: z.string().url(),
+    dependencyKey: z.string().min(1).optional(),
     tags: z.record(z.string()).optional(),
     owner: z.string().optional(),
     pollIntervalOverrideSec: z.number().int().positive().optional()
@@ -18,13 +19,13 @@ export async function servicesRoutes(fastify) {
         const exists = await prisma.service.findFirst({ where: { name: parsed.name, environment: parsed.environment } });
         if (exists)
             return reply.code(409).send({ error: 'service already exists' });
-        const svc = await prisma.service.create({ data: { name: parsed.name, environment: parsed.environment, endpointUrl: parsed.endpointUrl, tagsJson: JSON.stringify(parsed.tags || {}), owner: parsed.owner, pollIntervalOverrideSec: parsed.pollIntervalOverrideSec } });
+        const svc = await prisma.service.create({ data: { name: parsed.name, environment: parsed.environment, endpointUrl: parsed.endpointUrl, dependencyKey: parsed.dependencyKey, tagsJson: JSON.stringify(parsed.tags || {}), owner: parsed.owner, pollIntervalOverrideSec: parsed.pollIntervalOverrideSec } });
         reply.code(201).send(svc);
     });
     // List
     fastify.get('/services', async (_req, reply) => {
         const svcs = await prisma.service.findMany({ include: { statusCurrent: true } });
-        reply.send(svcs.map(s => ({ id: s.id, name: s.name, environment: s.environment, endpointUrl: s.endpointUrl, overallStatus: s.statusCurrent?.overallStatus || 'UNKNOWN', updatedAt: s.updatedAt })));
+        reply.send(svcs.map(s => ({ id: s.id, name: s.name, environment: s.environment, endpointUrl: s.endpointUrl, dependencyKey: s.dependencyKey, overallStatus: s.statusCurrent?.overallStatus || 'UNKNOWN', updatedAt: s.updatedAt })));
     });
     // Detail
     fastify.get('/services/:id', async (req, reply) => {
@@ -49,6 +50,7 @@ export async function servicesRoutes(fastify) {
             name: svc.name,
             environment: svc.environment,
             endpointUrl: svc.endpointUrl,
+            dependencyKey: svc.dependencyKey || undefined,
             owner: svc.owner,
             pollIntervalOverrideSec: svc.pollIntervalOverrideSec,
             createdAt: svc.createdAt,
@@ -117,12 +119,35 @@ export async function servicesRoutes(fastify) {
             update: { mappedServiceId: parsed.mappedServiceId },
             create: { parentServiceId: id, dependencyName: parsed.dependencyName, mappedServiceId: parsed.mappedServiceId }
         });
+        // Update current snapshot row if exists
+        await prisma.serviceDependencyCurrent.updateMany({ where: { parentServiceId: id, dependencyName: parsed.dependencyName }, data: { mappedServiceId: parsed.mappedServiceId, updatedAt: new Date() } }).catch(() => { });
+        // Regenerate graph edges for parent service (simple approach)
+        const currentRows = await prisma.serviceDependencyCurrent.findMany({ where: { parentServiceId: id }, select: { dependencyName: true, mappedServiceId: true, status: true } });
+        await prisma.graphEdge.deleteMany({ where: { fromServiceId: id } });
+        if (currentRows.length) {
+            await prisma.graphEdge.createMany({ data: currentRows.map(r => ({ fromServiceId: id, toServiceId: r.mappedServiceId, dependencyName: r.dependencyName, status: r.status })) });
+        }
         reply.code(201).send(override);
     });
     // Delete a manual mapping override
     fastify.delete('/services/:id/dependencies/map/:dependencyName', { preHandler: requireApiKey }, async (req, reply) => {
         const { id, dependencyName } = req.params;
         await prisma.dependencyMappingOverride.delete({ where: { parentServiceId_dependencyName: { parentServiceId: id, dependencyName } } }).catch(() => { });
+        // Re-evaluate mapping for snapshot row (try automatic name match)
+        const snap = await prisma.serviceDependencyCurrent.findUnique({ where: { parentServiceId_dependencyName: { parentServiceId: id, dependencyName } } }).catch(() => null);
+        if (snap) {
+            const parent = await prisma.service.findUnique({ where: { id } });
+            let mapped = null;
+            if (parent) {
+                mapped = await prisma.service.findFirst({ where: { name: dependencyName, environment: parent.environment } });
+            }
+            await prisma.serviceDependencyCurrent.update({ where: { parentServiceId_dependencyName: { parentServiceId: id, dependencyName } }, data: { mappedServiceId: mapped?.id || null, updatedAt: new Date() } }).catch(() => { });
+            // Rebuild edges for parent
+            const rows = await prisma.serviceDependencyCurrent.findMany({ where: { parentServiceId: id }, select: { dependencyName: true, mappedServiceId: true, status: true } });
+            await prisma.graphEdge.deleteMany({ where: { fromServiceId: id } });
+            if (rows.length)
+                await prisma.graphEdge.createMany({ data: rows.map(r => ({ fromServiceId: id, toServiceId: r.mappedServiceId, dependencyName: r.dependencyName, status: r.status })) });
+        }
         reply.code(204).send();
     });
     // Delete service (and associated data)

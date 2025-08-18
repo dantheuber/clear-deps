@@ -12,6 +12,7 @@ model Service {
   name                   String
   environment            String    @default("default")
   endpointUrl            String
+  dependencyKey          String?   // optional key inside returned JSON holding dependency array
   tagsJson               String? // JSON string
   owner                  String?
   pollIntervalOverrideSec Int?
