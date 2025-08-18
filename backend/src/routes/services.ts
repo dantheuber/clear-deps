@@ -28,7 +28,29 @@ export async function servicesRoutes(fastify: FastifyInstance) {
   // List
   fastify.get('/services', async (_req, reply) => {
     const svcs = await prisma.service.findMany({ include: { statusCurrent: true }});
-  reply.send(svcs.map(s=>({ id: s.id, name: s.name, environment: s.environment, endpointUrl: s.endpointUrl, dependencyKey: (s as any).dependencyKey, overallStatus: s.statusCurrent?.overallStatus || 'UNKNOWN', updatedAt: s.updatedAt })));
+    const serviceIds = svcs.map(s=>s.id);
+    // derive last poll success per service
+    const lastPollMap = new Map<string, boolean>();
+    try {
+      const recent = await prisma.pollRun.findMany({ where: { serviceId: { in: serviceIds } }, orderBy: { startedAt: 'desc' }, take: serviceIds.length * 5, select: { serviceId: true, success: true }});
+      for (const pr of recent) {
+        if (!lastPollMap.has(pr.serviceId)) lastPollMap.set(pr.serviceId, pr.success);
+        if (lastPollMap.size === serviceIds.length) break;
+      }
+    } catch { /* ignore */ }
+    // dependency snapshot counts
+    let depCounts: Array<{ parentServiceId: string; _count: { dependencyName: number } }> = [];
+    try {
+      depCounts = await (prisma as any).serviceDependencyCurrent.groupBy({ by: ['parentServiceId'], _count: { dependencyName: true }, where: { parentServiceId: { in: serviceIds } }});
+    } catch { /* ignore unsupported groupBy prior to migration */ }
+    const depCountMap = new Map<string, number>();
+    for (const dc of depCounts) depCountMap.set(dc.parentServiceId, (dc as any)._count.dependencyName);
+    reply.send(svcs.map(s=>{
+      const lastSuccess = lastPollMap.has(s.id) ? lastPollMap.get(s.id) : undefined;
+      const reachStatus = lastSuccess === true ? 'OK' : lastSuccess === false ? 'ERROR' : 'UNKNOWN';
+      const hasDeps = (depCountMap.get(s.id) || 0) > 0;
+      return { id: s.id, name: s.name, environment: s.environment, endpointUrl: s.endpointUrl, dependencyKey: (s as any).dependencyKey, overallStatus: reachStatus, hasDeps, updatedAt: s.updatedAt };
+    }));
   });
 
   // Detail

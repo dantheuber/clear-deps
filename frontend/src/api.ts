@@ -6,7 +6,7 @@ export async function fetchJSON<T>(path: string): Promise<T> {
   return res.json();
 }
 
-export interface ServiceSummary { id: string; name: string; environment: string; endpointUrl: string; overallStatus: string; updatedAt: string; }
+export interface ServiceSummary { id: string; name: string; environment: string; endpointUrl: string; overallStatus: string; hasDeps?: boolean; updatedAt: string; }
 
 export function listServices() { return fetchJSON<ServiceSummary[]>('/services'); }
 

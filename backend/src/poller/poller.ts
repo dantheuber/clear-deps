@@ -157,6 +157,28 @@ export async function pollService(serviceId: string, logger: any) {
           } catch { /* ignore */ }
         }
       }
+      // Capture errorMessage / error fields from proactive-deps output if present
+      const errMsg = (d as any).errorMessage;
+      const errObj = (d as any).error;
+      if (errMsg || errObj) {
+        try {
+          const existing = metaStr ? JSON.parse(metaStr) : {};
+          if (errMsg && typeof existing.errorMessage !== 'string') existing.errorMessage = String(errMsg);
+          if (errObj && !existing.error) {
+            // attempt to serialize error
+            if (typeof errObj === 'string') existing.error = errObj;
+            else if (errObj && typeof errObj === 'object') {
+              existing.error = {
+                name: (errObj as any).name,
+                message: (errObj as any).message,
+                code: (errObj as any).code,
+                stack: (errObj as any).stack && String((errObj as any).stack).slice(0, 500)
+              };
+            }
+          }
+          metaStr = JSON.stringify(existing);
+        } catch { /* ignore */ }
+      }
   normalized.push({ pollRunId: pollRun.id, parentServiceId: service.id, dependencyName: name, dependencyType: depType || 'unknown', mappedServiceId: mapped?.id, status, metaJson: metaStr });
     }
     if (normalized.length === 0 && deps.length > 0) {
@@ -199,9 +221,9 @@ export async function pollService(serviceId: string, logger: any) {
       await prisma.dependencyHistory.createMany({ data: normalized.map(n=>({ serviceId: service.id, dependencyName: n.dependencyName, status: n.status })) });
     }
     await prisma.service.update({ where: { id: service.id }, data: { lastPolledAt: new Date(), consecutiveFailures: 0 }});
-    logger.info({ serviceId: service.id, deps: normalized.length }, 'poll success');
+    logger.info({ serviceId: service.id, serviceName: service.name, deps: normalized.length }, 'poll success');
   } catch (err: any) {
-    logger.warn({ err: err.message, serviceId: service.id }, 'poll failure');
+    logger.warn({ err: err.message, serviceId: service.id, serviceName: service.name }, 'poll failure');
     const pollRun = await prisma.pollRun.create({ data: { serviceId: service.id, success: false, httpStatus: undefined, durationMs: Date.now()-start, errorMessage: err.message }});
     pollRunId = pollRun.id;
     await prisma.service.update({ where: { id: service.id }, data: { lastPolledAt: new Date(), consecutiveFailures: { increment: 1 } }});

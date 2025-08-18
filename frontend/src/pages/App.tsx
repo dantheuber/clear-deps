@@ -56,9 +56,9 @@ export function App() {
         </details>
         {servicesQ.isLoading && <p>Loading...</p>}
         {servicesQ.error && <p>Error loading services</p>}
-  <table style={{ borderCollapse: 'collapse', minWidth: 600 }}>
+  <table style={{ borderCollapse: 'collapse', minWidth: 650 }}>
           <thead>
-            <tr><th align="left">Name</th><th>Env</th><th>Status</th><th>Endpoint</th><th></th></tr>
+            <tr><th align="left">Name</th><th>Env</th><th>Status</th><th>Deps?</th><th>Endpoint</th><th></th></tr>
           </thead>
           <tbody>
       {servicesQ.data?.map(s => (
@@ -66,6 +66,7 @@ export function App() {
                 <td style={{ cursor: 'pointer' }} onClick={()=>setSelectedServiceId(s.id)}>{s.name}</td>
                 <td>{s.environment}</td>
                 <td><StatusPill status={s.overallStatus} /></td>
+                <td style={{ textAlign: 'center', fontSize: 12 }}>{s.hasDeps ? '✔️' : '—'}</td>
                 <td><code>{s.endpointUrl}</code></td>
                 <td>
                   <button onClick={(e)=>{ e.stopPropagation(); if (confirm(`Delete service ${s.name}?`)) { deleteService(s.id, apiKey).then(()=>{ qc.invalidateQueries({ queryKey: ['services']}); if (selectedServiceId===s.id) setSelectedServiceId(undefined); }).catch(err=>alert('Delete failed: '+err.message)); } }} style={{ background: 'transparent', border: 'none', color: '#dc2626', cursor: 'pointer', fontSize: 12 }}>Delete</button>
@@ -180,6 +181,18 @@ function ServiceDetailPanel({ serviceId, allServices, onClose }: { serviceId?: s
                 <pre style={{ fontSize: 11, background: '#f1f5f9', padding: 6, borderRadius: 4, maxHeight: 200, overflow: 'auto' }}>{JSON.stringify(selectedDep.meta.checkDetails, null, 2)}</pre>
               </div>
             )}
+            {selectedDep.meta && selectedDep.meta.errorMessage && (
+              <div style={{ fontSize: 11, marginTop: 6 }}>
+                <div style={{ fontWeight: 600, color: '#dc2626' }}>Error Message</div>
+                <div style={{ background: '#fef2f2', color: '#991b1b', padding: 6, borderRadius: 4, border: '1px solid #fecaca', whiteSpace: 'pre-wrap' }}>{String(selectedDep.meta.errorMessage)}</div>
+              </div>
+            )}
+            {selectedDep.meta && selectedDep.meta.error && !selectedDep.meta.errorMessage && (
+              <div style={{ fontSize: 11, marginTop: 6 }}>
+                <div style={{ fontWeight: 600, color: '#dc2626' }}>Error</div>
+                <pre style={{ fontSize: 11, background: '#f1f5f9', padding: 6, borderRadius: 4, maxHeight: 180, overflow: 'auto' }}>{JSON.stringify(selectedDep.meta.error, null, 2)}</pre>
+              </div>
+            )}
             {selectedDep.meta && !selectedDep.meta.checkDetails && (
               <div style={{ fontSize: 11, marginTop: 6 }}>
                 <div style={{ fontWeight: 600 }}>Meta</div>
@@ -232,7 +245,7 @@ function ServiceDetailPanel({ serviceId, allServices, onClose }: { serviceId?: s
 // --- Graph Visualization ---
 import { forceSimulation, forceLink, forceManyBody, forceCenter, forceCollide } from 'd3-force';
 
-interface GraphData { nodes: Array<{ id: string; name: string; status: string; environment?: string | null; external?: boolean; depth?: number }>; edges: Array<{ from: string; to: string; name: string; status: string; latencyMs?: number }>; }
+interface GraphData { nodes: Array<{ id: string; name: string; status: string; hasDeps?: boolean; environment?: string | null; external?: boolean; depth?: number }>; edges: Array<{ from: string; to: string; name: string; status: string; latencyMs?: number }>; }
 
 function GraphVis({ data, selectedId, onSelectService }: { data: GraphData; selectedId?: string; onSelectService: (id: string)=>void }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -505,7 +518,8 @@ function GraphVis({ data, selectedId, onSelectService }: { data: GraphData; sele
         const inHighlight = highlightNodeSet ? highlightNodeSet.has(n.id) : false;
         const strokeW = inHighlight ? 4 : 3;
         ctx.lineWidth = strokeW;
-        ctx.strokeStyle = statusColor(n.status);
+  // Border: if reachable (status OK) and dependencies present, paint black border per requirement; otherwise status color.
+  ctx.strokeStyle = (n.status === 'OK' && n.hasDeps) ? '#000000' : statusColor(n.status);
         ctx.fillStyle = inHighlight ? '#f0f9ff' : '#ffffff';
         if (n.external) {
           // circle for external dependency
