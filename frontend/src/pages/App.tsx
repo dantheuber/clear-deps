@@ -241,14 +241,17 @@ function GraphVis({ data, selectedId, onSelectService }: { data: GraphData; sele
   const transformRef = useRef({ scale: 1, tx: 0, ty: 0 });
   const nodesRef = useRef<any[]>([]);
   const linksRef = useRef<any[]>([]);
+  const edgeGeomRef = useRef<Array<{ link: any; x1: number; y1: number; x2: number; y2: number }>>([]);
   const simRef = useRef<any>(null);
   const dragRef = useRef<{ node?: any; mode?: 'pan' | 'node'; startX: number; startY: number; origTx: number; origTy: number; moved: boolean }>({ startX:0, startY:0, origTx:0, origTy:0, moved:false });
   // selected node ref so tick handler always sees current selection
   const selectedIdRef = useRef<string | undefined>(selectedId);
+  const selectedEdgeRef = useRef<any | null>(null);
   // live data ref for status/color updates without tearing down simulation
   const dataRef = useRef<GraphData>(data);
   useEffect(()=>{ dataRef.current = data; }, [data]);
-  useEffect(()=>{ selectedIdRef.current = selectedId; if (simRef.current) { simRef.current.alpha(0.05).restart(); } else { // if no sim yet trigger a manual redraw by resizing
+  useEffect(()=>{ selectedIdRef.current = selectedId; if (selectedId) { selectedEdgeRef.current = null; } // clear edge selection when node explicitly chosen
+    if (simRef.current) { simRef.current.alpha(0.05).restart(); } else { // if no sim yet trigger a manual redraw by resizing
     setDims(d=>({...d}));
   } }, [selectedId]);
   useEffect(()=>{
@@ -374,11 +377,35 @@ function GraphVis({ data, selectedId, onSelectService }: { data: GraphData; sele
           if (edgeStatusKey.has(key)) l.status = edgeStatusKey.get(key);
         }
       }
-      // compute upstream highlight chain for selectedId (dependencies that lead to selected service)
+      // compute upstream highlight chain (node or edge driven)
       let highlightEdgeSet: Set<any> | null = null;
       let highlightNodeSet: Set<string> | null = null;
-      const selId = selectedIdRef.current;
-      if (selId) {
+      const selEdge = selectedEdgeRef.current;
+      if (selEdge) {
+        // starting from provider (target) traverse providers upstream
+        const providerId = (selEdge.target && selEdge.target.id) ? selEdge.target.id : selEdge.target;
+        const consumerId = (selEdge.source && selEdge.source.id) ? selEdge.source.id : selEdge.source;
+        const queue: string[] = [providerId];
+        const visited = new Set<string>([providerId]);
+        const edgesUp = new Set<any>([selEdge]);
+        const nodesUp = new Set<string>([providerId, consumerId]);
+        let guard = 0;
+        while (queue.length && guard < links.length * 10) {
+          guard++;
+          const current = queue.shift()!;
+          for (const l of links) {
+            const sId = (l.source && l.source.id) ? l.source.id : l.source;
+            const tId = (l.target && l.target.id) ? l.target.id : l.target;
+            if (sId === current) { // current consumes provider tId
+              if (!visited.has(tId)) { visited.add(tId); queue.push(tId); }
+              edgesUp.add(l); nodesUp.add(tId); nodesUp.add(sId);
+            }
+          }
+        }
+        highlightEdgeSet = edgesUp; highlightNodeSet = nodesUp;
+      } else {
+        const selId = selectedIdRef.current;
+        if (selId) {
         // Graph storage: source = consumer, target = provider.
         // Upstream providers for a selected service are found by traversing outward along
         // edges whose source == current (i.e. dependencies it declares), then repeating from each provider.
@@ -402,8 +429,10 @@ function GraphVis({ data, selectedId, onSelectService }: { data: GraphData; sele
         }
         highlightEdgeSet = edgesUp;
         highlightNodeSet = nodesUp;
+        }
       }
-      // Edges first
+  edgeGeomRef.current = [];
+  // Edges first
       for (const l of links) {
         const origFrom: any = l.source; const origTo: any = l.target;
         // Reverse: show arrow from provider (origTo) to dependent (origFrom)
@@ -423,7 +452,8 @@ function GraphVis({ data, selectedId, onSelectService }: { data: GraphData; sele
           ctx.globalAlpha = 0.55;
           ctx.lineWidth = 2;
         }
-        const mid = drawArrow(from, to, color);
+  const mid = drawArrow(from, to, color);
+  edgeGeomRef.current.push({ link: l, x1: from.x, y1: from.y, x2: to.x, y2: to.y });
         ctx.lineWidth = prevLineWidth;
         ctx.globalAlpha = prevAlpha;
         // show latency label if provided (including 0)
@@ -524,6 +554,22 @@ function GraphVis({ data, selectedId, onSelectService }: { data: GraphData; sele
       }
       return undefined;
     }
+    function hitEdge(x: number, y: number): any | null {
+      // x,y are world coords. We'll compute distance to each segment.
+      const maxDist = 8; // world-space tolerance (will scale with zoom roughly ok)
+      let closest: { link: any; dist: number } | null = null;
+      for (const eg of edgeGeomRef.current) {
+        const { x1, y1, x2, y2, link } = eg as any;
+        const dx = x2 - x1; const dy = y2 - y1;
+        const len2 = dx*dx + dy*dy || 1;
+        let t = ((x - x1)*dx + (y - y1)*dy)/len2;
+        if (t < 0) t = 0; else if (t > 1) t = 1;
+        const px = x1 + dx*t; const py = y1 + dy*t;
+        const ddx = x - px; const ddy = y - py; const dist = Math.sqrt(ddx*ddx + ddy*ddy);
+        if (dist <= maxDist && (!closest || dist < closest.dist)) closest = { link, dist };
+      }
+      return closest?.link || null;
+    }
     function onWheel(ev: WheelEvent) {
       ev.preventDefault();
     if (!canvas) return;
@@ -544,7 +590,7 @@ function GraphVis({ data, selectedId, onSelectService }: { data: GraphData; sele
     const rect = canvas.getBoundingClientRect();
       const x = ev.clientX - rect.left; const y = ev.clientY - rect.top;
       const { wx, wy } = toWorld(x,y);
-      const node = hitNode(wx, wy);
+  const node = hitNode(wx, wy);
       dragRef.current.node = node;
       dragRef.current.mode = node ? 'node' : 'pan';
       dragRef.current.startX = x; dragRef.current.startY = y; dragRef.current.origTx = transformRef.current.tx; dragRef.current.origTy = transformRef.current.ty; dragRef.current.moved = false;
@@ -593,8 +639,21 @@ function GraphVis({ data, selectedId, onSelectService }: { data: GraphData; sele
           onSelectService(node.id);
         }
       } else if (!dragRef.current.moved) {
-        // background click -> deselect maybe
-        // onSelectService(undefined as any); // leave untouched
+        // Edge click detection when not dragging a node
+        if (canvas) {
+          const rect = canvas.getBoundingClientRect();
+          const cx = ev.clientX - rect.left; const cy = ev.clientY - rect.top;
+          const { wx, wy } = toWorld(cx, cy);
+          const edge = hitEdge(wx, wy);
+          if (edge) {
+            selectedEdgeRef.current = edge; // select edge
+            selectedIdRef.current = undefined; // clear node selection
+            if (simRef.current) simRef.current.alpha(0.02).restart();
+          } else {
+            // background click clears edge selection only
+            if (selectedEdgeRef.current) { selectedEdgeRef.current = null; if (simRef.current) simRef.current.alpha(0.02).restart(); }
+          }
+        }
       }
       dragRef.current.mode = undefined; dragRef.current.node = undefined; dragRef.current.moved = false;
   if (canvas) canvas.style.cursor = 'default';
