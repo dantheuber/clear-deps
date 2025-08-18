@@ -1,6 +1,7 @@
 export const config = {
   apiKey: process.env.API_KEY || 'change-me-dev',
-  defaultPollIntervalSec: parseInt(process.env.DEFAULT_POLL_INTERVAL_SEC || '60', 10),
+  // Reduced from 60 to 30 to poll dependencies more frequently by default
+  defaultPollIntervalSec: parseInt(process.env.DEFAULT_POLL_INTERVAL_SEC || '30', 10),
   maxParallelPolls: parseInt(process.env.MAX_PARALLEL_POLLS || '10', 10),
   pollTimeoutMs: parseInt(process.env.POLL_TIMEOUT_MS || '2000', 10),
   pollMaxSizeBytes: parseInt(process.env.POLL_MAX_SIZE_BYTES || '262144', 10),
