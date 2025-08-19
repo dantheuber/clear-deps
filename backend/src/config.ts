@@ -7,7 +7,7 @@ export const config = {
   pollMaxSizeBytes: parseInt(process.env.POLL_MAX_SIZE_BYTES || '262144', 10),
 };
 
-export const STATUS_ORDER = ['OK','WARN','UNKNOWN','ERROR']; // used for comparison (indexOf)
+export const STATUS_ORDER = ['OK', 'WARN', 'UNKNOWN', 'ERROR']; // used for comparison (indexOf)
 
 export function worstStatus(statuses: string[]): string {
   let worst = 'OK';
@@ -20,10 +20,10 @@ export function worstStatus(statuses: string[]): string {
 export function normalizeStatus(input?: string | null): string {
   if (!input) return 'UNKNOWN';
   const v = input.toLowerCase();
-  if (['success','healthy','ok'].includes(v)) return 'OK';
-  if (['warn','warning','degraded'].includes(v)) return 'WARN';
-  if (['error','fail','failed','down'].includes(v)) return 'ERROR';
-  if (['unknown','missing'].includes(v)) return 'UNKNOWN';
+  if (['success', 'healthy', 'ok'].includes(v)) return 'OK';
+  if (['warn', 'warning', 'degraded'].includes(v)) return 'WARN';
+  if (['error', 'fail', 'failed', 'down'].includes(v)) return 'ERROR';
+  if (['unknown', 'missing'].includes(v)) return 'UNKNOWN';
   return 'UNKNOWN';
 }
 

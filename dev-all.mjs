@@ -22,7 +22,12 @@ function logPrefix(name, colorCode) {
 function spawnProc(name, color, cmd, args, cwd) {
   const absCwd = path.resolve(cwd);
   const useShell = platform() === 'win32';
-  const child = spawn(cmd, args, { cwd: absCwd, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env }, shell: useShell });
+  const child = spawn(cmd, args, {
+    cwd: absCwd,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: { ...process.env },
+    shell: useShell,
+  });
   child.stdout.on('data', logPrefix(name, color));
   child.stderr.on('data', logPrefix(name, color));
   child.on('error', (err) => {
@@ -51,22 +56,27 @@ function shutdown(reason) {
       if (platform() === 'win32') {
         // taskkill ensures tree termination on Windows
         const tk = spawn('taskkill', ['/pid', String(child.pid), '/T', '/F']);
-        tk.on('exit', ()=>{});
+        tk.on('exit', () => {});
       } else {
         child.kill('SIGTERM');
         // Fallback hard kill after timeout
-        setTimeout(()=> { if (child.exitCode == null) child.kill('SIGKILL'); }, 5000);
+        setTimeout(() => {
+          if (child.exitCode == null) child.kill('SIGKILL');
+        }, 5000);
       }
     } catch (e) {
       console.warn(`[orchestrator] error killing ${name}:`, e.message);
     }
   }
-  setTimeout(()=> process.exit(0), 1000);
+  setTimeout(() => process.exit(0), 1000);
 }
 
 process.on('SIGINT', () => shutdown('SIGINT'));
 process.on('SIGTERM', () => shutdown('SIGTERM'));
-process.on('uncaughtException', (e) => { console.error(e); shutdown('uncaughtException'); });
+process.on('uncaughtException', (e) => {
+  console.error(e);
+  shutdown('uncaughtException');
+});
 
 // Start backend then frontend; allow both to run concurrently.
 function ensureInstall(dir) {
@@ -94,9 +104,9 @@ ensureInstall('./backend');
 ensureInstall('./frontend');
 
 console.log('[orchestrator] Starting backend dev with npm ...');
-spawnProc('backend', '36', getNpmCmd(), ['run','dev'], './backend');
+spawnProc('backend', '36', getNpmCmd(), ['run', 'dev'], './backend');
 
 console.log('[orchestrator] Starting frontend dev with npm ...');
-spawnProc('frontend', '35', getNpmCmd(), ['run','dev'], './frontend');
+spawnProc('frontend', '35', getNpmCmd(), ['run', 'dev'], './frontend');
 
 console.log('[orchestrator] Both processes started. Press Ctrl+C to stop.');

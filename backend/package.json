@@ -4,7 +4,9 @@
   "private": true,
   "type": "module",
   "scripts": {
-  "dev": "tsx watch src/index.ts",
+    "dev": "tsx watch src/index.ts",
+    "lint": "eslint . --ext .ts",
+    "lint:fix": "eslint . --ext .ts --fix",
     "build": "tsc -p .",
     "start": "node dist/index.js",
     "prisma:generate": "prisma generate",
@@ -12,17 +14,17 @@
   },
   "dependencies": {
     "@prisma/client": "^5.16.1",
-  "fastify": "^5.5.0",
-  "@fastify/cors": "^10.0.0",
+    "fastify": "^5.5.0",
+    "@fastify/cors": "^10.0.0",
     "fastify-plugin": "^4.5.1",
-  "pino": "^8.21.0",
-  "zod": "^3.23.8",
-  "dotenv": "^16.4.5"
+    "pino": "^8.21.0",
+    "zod": "^3.23.8",
+    "dotenv": "^16.4.5"
   },
   "devDependencies": {
     "prisma": "^5.16.1",
-  "tsx": "^4.15.7",
-  "typescript": "^5.4.5",
-  "@types/node": "^20.11.30"
+    "tsx": "^4.15.7",
+    "typescript": "^5.4.5",
+    "@types/node": "^20.11.30"
   }
 }
