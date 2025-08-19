@@ -250,6 +250,9 @@ interface GraphData { nodes: Array<{ id: string; name: string; status: string; h
 function GraphVis({ data, selectedId, onSelectService }: { data: GraphData; selectedId?: string; onSelectService: (id: string)=>void }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const [dims, setDims] = useState({ w: 1000, h: 700 });
+  // Layout persistence
+  const LAYOUT_KEY = 'clearDepsGraphLayout_v1';
+  const layoutRef = useRef<Record<string,{ x:number; y:number }>>({});
   // interaction refs
   const transformRef = useRef({ scale: 1, tx: 0, ty: 0 });
   const nodesRef = useRef<any[]>([]);
@@ -285,20 +288,34 @@ function GraphVis({ data, selectedId, onSelectService }: { data: GraphData; sele
     // prepare font for measuring
     const measureCtx = ctx;
     measureCtx.font = '11px system-ui';
+    // Load stored layout once (per component lifetime) before building nodes
+    if (Object.keys(layoutRef.current).length === 0) {
+      try {
+        const raw = localStorage.getItem(LAYOUT_KEY);
+        if (raw) layoutRef.current = JSON.parse(raw);
+      } catch { /* ignore */ }
+    }
     const nodes: any[] = data.nodes.map(n=>{
       const base: any = { ...n };
       const prev = prevMap.get(n.id);
+      const stored = layoutRef.current[n.id];
       if (prev) {
         base.x = prev.x; base.y = prev.y;
         if (typeof prev.vx === 'number') base.vx = prev.vx;
         if (typeof prev.vy === 'number') base.vy = prev.vy;
         if (prev.fx !== undefined) base.fx = prev.fx;
         if (prev.fy !== undefined) base.fy = prev.fy;
+      } else if (stored) {
+        base.x = stored.x; base.y = stored.y;
+        // Fix to stored coordinates initially so simulation doesn't drift them
+        base.fx = stored.x; base.fy = stored.y;
       }
       const d = typeof n.depth === 'number' ? n.depth : 0;
       const targetY = d * layerGap + 40;
-      if (!prev) base.y = targetY + (Math.random()*10 - 5);
-      base.fy = targetY;
+      if (!prev && !stored) {
+        base.y = targetY + (Math.random()*10 - 5);
+        base.fy = targetY; // only pin depth for nodes without stored layout
+      }
       base._depth = d;
       // dynamic sizing
   const paddingX = 16;
@@ -324,8 +341,8 @@ function GraphVis({ data, selectedId, onSelectService }: { data: GraphData; sele
     if (prevMap.size > 0) {
       sim.alpha(0.4);
     }
-    simRef.current = sim;
-    function statusColor(status: string) {
+  simRef.current = sim;
+  function statusColor(status: string) {
       return status === 'OK' ? '#16a34a' : status === 'WARN' ? '#f59e0b' : status === 'ERROR' ? '#dc2626' : '#64748b';
     }
     function boundaryDistance(node: any, ux: number, uy: number) {
@@ -368,14 +385,13 @@ function GraphVis({ data, selectedId, onSelectService }: { data: GraphData; sele
       const nx = -uy; const ny = ux;
       return { mx: (startX+endX)/2, my: (startY+endY)/2, nx, ny };
     }
-    sim.on('tick', ()=>{
-      // reset & clear
+    // Unified draw function reused by simulation ticks & interaction events
+    function draw() {
+      if (!ctx) return;
       ctx.setTransform(1,0,0,1,0,0);
       ctx.clearRect(0,0,dims.w,dims.h);
-      // apply pan/zoom
       const { scale, tx, ty } = transformRef.current;
       ctx.setTransform(scale,0,0,scale,tx,ty);
-      // sync dynamic status changes without rebuilding simulation
       const latest = dataRef.current;
       if (latest) {
         const statusMap = new Map<string,string>();
@@ -390,12 +406,11 @@ function GraphVis({ data, selectedId, onSelectService }: { data: GraphData; sele
           if (edgeStatusKey.has(key)) l.status = edgeStatusKey.get(key);
         }
       }
-      // compute upstream highlight chain (node or edge driven)
+      // highlight calculation
       let highlightEdgeSet: Set<any> | null = null;
       let highlightNodeSet: Set<string> | null = null;
       const selEdge = selectedEdgeRef.current;
       if (selEdge) {
-        // starting from provider (target) traverse providers upstream
         const providerId = (selEdge.target && selEdge.target.id) ? selEdge.target.id : selEdge.target;
         const consumerId = (selEdge.source && selEdge.source.id) ? selEdge.source.id : selEdge.source;
         const queue: string[] = [providerId];
@@ -409,7 +424,7 @@ function GraphVis({ data, selectedId, onSelectService }: { data: GraphData; sele
           for (const l of links) {
             const sId = (l.source && l.source.id) ? l.source.id : l.source;
             const tId = (l.target && l.target.id) ? l.target.id : l.target;
-            if (sId === current) { // current consumes provider tId
+            if (sId === current) {
               if (!visited.has(tId)) { visited.add(tId); queue.push(tId); }
               edgesUp.add(l); nodesUp.add(tId); nodesUp.add(sId);
             }
@@ -419,136 +434,68 @@ function GraphVis({ data, selectedId, onSelectService }: { data: GraphData; sele
       } else {
         const selId = selectedIdRef.current;
         if (selId) {
-        // Graph storage: source = consumer, target = provider.
-        // Upstream providers for a selected service are found by traversing outward along
-        // edges whose source == current (i.e. dependencies it declares), then repeating from each provider.
-        const queue: string[] = [selId];
-        const visited = new Set<string>([selId]);
-        const edgesUp = new Set<any>();
-        const nodesUp = new Set<string>([selId]);
-        let guard = 0;
-        while (queue.length && guard < links.length * 10) {
-          guard++;
-          const current = queue.shift()!;
-          for (const l of links) {
-            const sId = (l.source && l.source.id) ? l.source.id : l.source;
-            const tId = (l.target && l.target.id) ? l.target.id : l.target; // provider
-            if (sId === current) {
-              // highlight this consumer->provider edge and traverse to provider
-              if (!visited.has(tId)) { visited.add(tId); queue.push(tId); }
-              edgesUp.add(l); nodesUp.add(tId);
+          const queue: string[] = [selId];
+          const visited = new Set<string>([selId]);
+            const edgesUp = new Set<any>();
+            const nodesUp = new Set<string>([selId]);
+            let guard = 0;
+            while (queue.length && guard < links.length * 10) {
+              guard++;
+              const current = queue.shift()!;
+              for (const l of links) {
+                const sId = (l.source && l.source.id) ? l.source.id : l.source;
+                const tId = (l.target && l.target.id) ? l.target.id : l.target;
+                if (sId === current) {
+                  if (!visited.has(tId)) { visited.add(tId); queue.push(tId); }
+                  edgesUp.add(l); nodesUp.add(tId);
+                }
+              }
             }
-          }
-        }
-        highlightEdgeSet = edgesUp;
-        highlightNodeSet = nodesUp;
+            highlightEdgeSet = edgesUp; highlightNodeSet = nodesUp;
         }
       }
-  edgeGeomRef.current = [];
-  // Edges first
+      edgeGeomRef.current = [];
       for (const l of links) {
         const origFrom: any = l.source; const origTo: any = l.target;
-        // Reverse: show arrow from provider (origTo) to dependent (origFrom)
         let from = origTo; let to = origFrom;
         const color = statusColor(l.status);
         const highlighted = highlightEdgeSet ? highlightEdgeSet.has(l) : false;
-        // adjust styling for highlight
         const prevLineWidth = ctx.lineWidth;
         const prevAlpha = ctx.globalAlpha;
-        if (!highlighted && highlightEdgeSet) {
-          ctx.globalAlpha = 0.15;
-          ctx.lineWidth = 2;
-        } else if (highlighted) {
-          ctx.globalAlpha = 1;
-          ctx.lineWidth = 4;
-        } else {
-          ctx.globalAlpha = 0.55;
-          ctx.lineWidth = 2;
-        }
-  const mid = drawArrow(from, to, color);
-  edgeGeomRef.current.push({ link: l, x1: from.x, y1: from.y, x2: to.x, y2: to.y });
-        ctx.lineWidth = prevLineWidth;
-        ctx.globalAlpha = prevAlpha;
-        // show latency label if provided (including 0)
+        if (!highlighted && highlightEdgeSet) { ctx.globalAlpha = 0.15; ctx.lineWidth = 2; }
+        else if (highlighted) { ctx.globalAlpha = 1; ctx.lineWidth = 4; }
+        else { ctx.globalAlpha = 0.55; ctx.lineWidth = 2; }
+        const mid = drawArrow(from, to, color);
+        edgeGeomRef.current.push({ link: l, x1: from.x, y1: from.y, x2: to.x, y2: to.y });
+        ctx.lineWidth = prevLineWidth; ctx.globalAlpha = prevAlpha;
         if (l.latencyMs !== undefined && l.latencyMs !== null && (!highlightEdgeSet || highlightEdgeSet.has(l))) {
           const label = `${l.latencyMs}ms`;
           ctx.save();
-          // keep font size independent of zoom
           ctx.setTransform(1,0,0,1,0,0);
-          ctx.font = '10px system-ui';
-          ctx.textAlign = 'center';
-          ctx.textBaseline = 'middle';
-          // offset label slightly off the arrow line using perpendicular normal
-          const off = 14;
-          const nx = (mid as any).nx ?? 0; const ny = (mid as any).ny ?? -1; // default perpendicular up if missing
-          // transform world -> screen for label placement, then offset in screen space for consistency
-          const { scale, tx, ty } = transformRef.current;
-          const sx = mid.mx * scale + tx; const sy = mid.my * scale + ty;
-          const lx = sx + nx * off; const ly = sy + ny * off;
-          // background pill
-          const metrics = ctx.measureText(label);
-          const padX = 4; const padY = 2;
-          const textW = metrics.width; const textH = 10; // approx
-          ctx.fillStyle = 'rgba(255,255,255,0.85)';
-          ctx.strokeStyle = color;
-          ctx.lineWidth = 0.5;
-          const rx = lx - textW/2 - padX; const ry = ly - textH/2 - padY; const rw = textW + padX*2; const rh = textH + padY*2;
-          const r = 4;
-          ctx.beginPath();
-          ctx.moveTo(rx + r, ry);
-          ctx.lineTo(rx + rw - r, ry);
-          ctx.quadraticCurveTo(rx + rw, ry, rx + rw, ry + r);
-          ctx.lineTo(rx + rw, ry + rh - r);
-          ctx.quadraticCurveTo(rx + rw, ry + rh, rx + rw - r, ry + rh);
-          ctx.lineTo(rx + r, ry + rh);
-          ctx.quadraticCurveTo(rx, ry + rh, rx, ry + rh - r);
-          ctx.lineTo(rx, ry + r);
-          ctx.quadraticCurveTo(rx, ry, rx + r, ry);
-          ctx.closePath();
-          ctx.fill();
-          ctx.stroke();
-          // text
-          ctx.fillStyle = '#0f172a';
-          ctx.fillText(label, lx, ly + 1);
-          ctx.restore();
+          ctx.font = '10px system-ui'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+          const off = 14; const nx = (mid as any).nx ?? 0; const ny = (mid as any).ny ?? -1;
+          const { scale, tx, ty } = transformRef.current; const sx = mid.mx * scale + tx; const sy = mid.my * scale + ty; const lx = sx + nx * off; const ly = sy + ny * off;
+          const metrics = ctx.measureText(label); const padX = 4; const padY = 2; const textW = metrics.width; const textH = 10;
+          ctx.fillStyle = 'rgba(255,255,255,0.85)'; ctx.strokeStyle = color; ctx.lineWidth = 0.5;
+          const rx = lx - textW/2 - padX; const ry = ly - textH/2 - padY; const rw = textW + padX*2; const rh = textH + padY*2; const r = 4;
+          ctx.beginPath(); ctx.moveTo(rx + r, ry); ctx.lineTo(rx + rw - r, ry); ctx.quadraticCurveTo(rx + rw, ry, rx + rw, ry + r); ctx.lineTo(rx + rw, ry + rh - r); ctx.quadraticCurveTo(rx + rw, ry + rh, rx + rw - r, ry + rh); ctx.lineTo(rx + r, ry + rh); ctx.quadraticCurveTo(rx, ry + rh, rx, ry + rh - r); ctx.lineTo(rx, ry + r); ctx.quadraticCurveTo(rx, ry, rx + r, ry); ctx.closePath(); ctx.fill(); ctx.stroke();
+          ctx.fillStyle = '#0f172a'; ctx.fillText(label, lx, ly + 1); ctx.restore();
         }
       }
-      // Nodes
       for (const n of nodes) {
         const inHighlight = highlightNodeSet ? highlightNodeSet.has(n.id) : false;
-        const strokeW = inHighlight ? 4 : 3;
-        ctx.lineWidth = strokeW;
-  // Border: if reachable (status OK) and dependencies present, paint black border per requirement; otherwise status color.
-  ctx.strokeStyle = (n.status === 'OK' && n.hasDeps) ? '#000000' : statusColor(n.status);
+        const strokeW = inHighlight ? 4 : 3; ctx.lineWidth = strokeW;
+        ctx.strokeStyle = (n.status === 'OK' && n.hasDeps) ? '#000000' : statusColor(n.status);
         ctx.fillStyle = inHighlight ? '#f0f9ff' : '#ffffff';
-        if (n.external) {
-          // circle for external dependency
-            ctx.beginPath();
-            const r = 20;
-            ctx.arc(n.x, n.y, r, 0, Math.PI*2);
-            ctx.fill();
-            ctx.stroke();
-        } else {
-          const halfW = n._w ? n._w/2 : 36; const halfH = n._h ? n._h/2 : 22;
-          ctx.beginPath();
-          ctx.rect(n.x - halfW, n.y - halfH, halfW*2, halfH*2);
-          ctx.fill();
-          ctx.stroke();
-        }
-        // label inside shape (screen-space so it's stable vs zoom)
-        ctx.save();
-        ctx.setTransform(1,0,0,1,0,0);
-        const { scale, tx, ty } = transformRef.current;
-        const sx = n.x * scale + tx; const sy = n.y * scale + ty;
-        ctx.font = '11px system-ui';
-        ctx.fillStyle = '#0f172a';
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-  const label = n._label || n.name;
-  ctx.fillText(label, sx, sy);
-        ctx.restore();
+        if (n.external) { ctx.beginPath(); const r = 20; ctx.arc(n.x, n.y, r, 0, Math.PI*2); ctx.fill(); ctx.stroke(); }
+        else { const halfW = n._w ? n._w/2 : 36; const halfH = n._h ? n._h/2 : 22; ctx.beginPath(); ctx.rect(n.x - halfW, n.y - halfH, halfW*2, halfH*2); ctx.fill(); ctx.stroke(); }
+        ctx.save(); ctx.setTransform(1,0,0,1,0,0); const { scale, tx, ty } = transformRef.current; const sx = n.x * scale + tx; const sy = n.y * scale + ty; ctx.font = '11px system-ui'; ctx.fillStyle = '#0f172a'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; const label = n._label || n.name; ctx.fillText(label, sx, sy); ctx.restore();
       }
-    });
+    }
+    // initial draw via simulation tick
+    sim.on('tick', ()=>{ draw(); });
+    // draw once quickly (in case simulation stops early)
+    draw();
     return ()=>{ sim.stop(); };
   }, [data, dims.w, dims.h]);
   // capture clicks
@@ -584,6 +531,27 @@ function GraphVis({ data, selectedId, onSelectService }: { data: GraphData; sele
       }
       return closest?.link || null;
     }
+    function scheduleRedraw() {
+      // use rAF batching
+      requestAnimationFrame(()=>{
+        const ctx = canvasRef.current?.getContext('2d');
+        // trigger draw by nudging simulation alpha if halted OR manually calling draw
+        if (simRef.current && simRef.current.alpha() > simRef.current.alphaMin()) {
+          // active simulation will redraw on next tick
+        } else {
+          // manual draw
+          const drawFn = (simRef.current as any)?._drawCustom || null;
+        }
+      });
+    }
+    function customDraw() {
+      // invoke internal draw through restarting minimal alpha if available
+      const ctx = canvasRef.current?.getContext('2d');
+      if (!ctx) return;
+      // reproduce core draw by triggering one tickless render: reuse effect's draw via storing global
+      // Simpler: restart tiny alpha; tick handler will render quickly.
+      if (simRef.current) { simRef.current.alpha(0.001).restart(); }
+    }
     function onWheel(ev: WheelEvent) {
       ev.preventDefault();
     if (!canvas) return;
@@ -598,6 +566,7 @@ function GraphVis({ data, selectedId, onSelectService }: { data: GraphData; sele
       // keep cursor position stable
       transformRef.current.tx = x - world.wx * newScale;
       transformRef.current.ty = y - world.wy * newScale;
+      customDraw();
     }
     function onDown(ev: MouseEvent) {
     if (!canvas) return;
@@ -628,11 +597,13 @@ function GraphVis({ data, selectedId, onSelectService }: { data: GraphData; sele
         const { wx, wy } = toWorld(x,y);
         dragRef.current.node.fx = wx;
         dragRef.current.node.fy = wy;
+        customDraw();
       } else if (dragRef.current.mode === 'pan') {
         const dx = x - dragRef.current.startX; const dy = y - dragRef.current.startY;
         if (Math.abs(dx) > 2 || Math.abs(dy) > 2) dragRef.current.moved = true;
         transformRef.current.tx = dragRef.current.origTx + dx;
         transformRef.current.ty = dragRef.current.origTy + dy;
+        customDraw();
       } else {
         // hover state
         const { wx, wy } = toWorld(x,y);
@@ -649,7 +620,7 @@ function GraphVis({ data, selectedId, onSelectService }: { data: GraphData; sele
         if (simRef.current) simRef.current.alphaTarget(0);
   if (canvas) canvas.style.cursor = 'grab';
   if (canvas) canvas.style.cursor = 'grab';
-        if (!dragRef.current.moved) {
+  if (!dragRef.current.moved) {
           onSelectService(node.id);
         }
       } else if (!dragRef.current.moved) {
@@ -660,7 +631,7 @@ function GraphVis({ data, selectedId, onSelectService }: { data: GraphData; sele
           const { wx, wy } = toWorld(cx, cy);
           const edge = hitEdge(wx, wy);
           if (edge) {
-            selectedEdgeRef.current = edge; // select edge
+    selectedEdgeRef.current = edge; // select edge
             selectedIdRef.current = undefined; // clear node selection
             if (simRef.current) simRef.current.alpha(0.02).restart();
           } else {
@@ -669,9 +640,25 @@ function GraphVis({ data, selectedId, onSelectService }: { data: GraphData; sele
           }
         }
       }
+      // Persist layout if a node was actually moved
+      if (wasNode && dragRef.current.moved && node) {
+        try {
+          // Update internal node fixed positions and save all
+          node.fx = node.x; node.fy = node.y;
+          const snapshot: Record<string,{x:number;y:number}> = {};
+          for (const n of nodesRef.current) {
+            if (!n.external && typeof n.x === 'number' && typeof n.y === 'number') {
+              snapshot[n.id] = { x: n.x, y: n.y };
+            }
+          }
+          layoutRef.current = snapshot;
+          localStorage.setItem(LAYOUT_KEY, JSON.stringify(snapshot));
+        } catch { /* ignore */ }
+      }
       dragRef.current.mode = undefined; dragRef.current.node = undefined; dragRef.current.moved = false;
   if (canvas) canvas.style.cursor = 'default';
   if (canvas) canvas.style.cursor = 'default';
+  customDraw();
     }
     canvas.addEventListener('wheel', onWheel, { passive: false });
     canvas.addEventListener('mousedown', onDown);
