@@ -555,7 +555,7 @@ function GraphVis({ data, selectedId, onSelectService }: { data: GraphData; sele
     function onWheel(ev: WheelEvent) {
       ev.preventDefault();
     if (!canvas) return;
-    const rect = canvas.getBoundingClientRect();
+      const rect = canvas.getBoundingClientRect();
       const x = ev.clientX - rect.left; const y = ev.clientY - rect.top;
       const { scale, tx, ty } = transformRef.current;
       const world = toWorld(x,y);
@@ -573,7 +573,7 @@ function GraphVis({ data, selectedId, onSelectService }: { data: GraphData; sele
     const rect = canvas.getBoundingClientRect();
       const x = ev.clientX - rect.left; const y = ev.clientY - rect.top;
       const { wx, wy } = toWorld(x,y);
-  const node = hitNode(wx, wy);
+      const node = hitNode(wx, wy);
       dragRef.current.node = node;
       dragRef.current.mode = node ? 'node' : 'pan';
       dragRef.current.startX = x; dragRef.current.startY = y; dragRef.current.origTx = transformRef.current.tx; dragRef.current.origTy = transformRef.current.ty; dragRef.current.moved = false;
@@ -609,7 +609,7 @@ function GraphVis({ data, selectedId, onSelectService }: { data: GraphData; sele
         const { wx, wy } = toWorld(x,y);
         const hoverNode = hitNode(wx, wy);
         canvas.style.cursor = hoverNode ? 'grab' : 'default';
-  if (canvas) canvas.style.cursor = hoverNode ? 'grab' : 'default';
+        if (canvas) canvas.style.cursor = hoverNode ? 'grab' : 'default';
       }
     }
     function onUp(ev: MouseEvent) {
@@ -618,9 +618,9 @@ function GraphVis({ data, selectedId, onSelectService }: { data: GraphData; sele
       if (wasNode && node) {
         // release but keep fixed position
         if (simRef.current) simRef.current.alphaTarget(0);
-  if (canvas) canvas.style.cursor = 'grab';
-  if (canvas) canvas.style.cursor = 'grab';
-  if (!dragRef.current.moved) {
+        if (canvas) canvas.style.cursor = 'grab';
+        if (canvas) canvas.style.cursor = 'grab';
+        if (!dragRef.current.moved) {
           onSelectService(node.id);
         }
       } else if (!dragRef.current.moved) {
