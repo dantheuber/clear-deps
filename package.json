@@ -18,10 +18,13 @@
     "@typescript-eslint/parser": "^7.0.0",
     "eslint": "^8.57.0",
     "eslint-config-prettier": "^9.0.0",
+    "eslint-import-resolver-typescript": "3.6.0",
     "eslint-plugin-import": "^2.29.0",
     "eslint-plugin-react": "^7.34.0",
     "eslint-plugin-react-hooks": "^4.6.0",
-    "eslint-import-resolver-typescript": "3.6.0",
     "prettier": "^3.3.3"
+  },
+  "dependencies": {
+    "d3-dag": "^1.1.0"
   }
 }

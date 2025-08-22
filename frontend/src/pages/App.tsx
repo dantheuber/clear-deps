@@ -642,7 +642,7 @@ function ServiceDetailPanel({
 }
 
 // --- Graph Visualization ---
-import { forceSimulation, forceLink, forceManyBody, forceCenter, forceCollide } from 'd3-force';
+import * as d3dag from 'd3-dag';
 
 interface GraphData {
   nodes: Array<{
@@ -674,11 +674,13 @@ function GraphVis({
   // interaction refs
   const transformRef = useRef({ scale: 1, tx: 0, ty: 0 });
   const nodesRef = useRef<any[]>([]);
-  const linksRef = useRef<any[]>([]);
+  const linksRef = useRef<any[]>([]); // draw links (provider -> consumer)
+  const logicalLinksRef = useRef<any[]>([]); // logical dependency links (consumer -> provider)
   const edgeGeomRef = useRef<Array<{ link: any; x1: number; y1: number; x2: number; y2: number }>>(
     []
   );
   const simRef = useRef<any>(null);
+  const drawRef = useRef<() => void>();
   const dragRef = useRef<{
     node?: any;
     mode?: 'pan' | 'node';
@@ -701,12 +703,8 @@ function GraphVis({
     if (selectedId) {
       selectedEdgeRef.current = null;
     } // clear edge selection when node explicitly chosen
-    if (simRef.current) {
-      simRef.current.alpha(0.05).restart();
-    } else {
-      // if no sim yet trigger a manual redraw by resizing
-      setDims((d) => ({ ...d }));
-    }
+  // trigger a redraw
+  if (drawRef.current) requestAnimationFrame(drawRef.current);
   }, [selectedId]);
   useEffect(() => {
     function handle() {
@@ -723,16 +721,58 @@ function GraphVis({
     if (!canvasRef.current) return;
     const ctx = canvasRef.current.getContext('2d');
     if (!ctx) return;
-    const layerGap = 150; // increased vertical gap per depth
-    // Capture previous node positions & fixed states
-    const prevMap = new Map<string, any>();
-    for (const pn of nodesRef.current) {
-      prevMap.set(pn.id, { x: pn.x, y: pn.y, vx: pn.vx, vy: pn.vy, fx: pn.fx, fy: pn.fy });
-    }
     // prepare font for measuring
     const measureCtx = ctx;
-    measureCtx.font = '11px system-ui';
-    // Load stored layout once (per component lifetime) before building nodes
+    const BASE_FONT_PX = 12;
+    const LINE_HEIGHT = 14; // px in world units
+    const PAD_X = 12;
+    const PAD_Y = 10;
+    const MIN_W = 96;
+    const MAX_W = 200;
+    const MAX_LINES = 3;
+    measureCtx.font = `${BASE_FONT_PX}px system-ui`;
+    // Wrap + measure cache
+    const measureCache = new Map<string, { w: number; h: number; lines: string[] }>();
+    function wrapText(text: string, maxLineWidth: number): { lines: string[]; width: number } {
+      const words = (text || '').split(/\s+/).filter(Boolean);
+      if (words.length === 0) return { lines: [''], width: 0 };
+      const lines: string[] = [];
+      let current = '';
+      let maxW = 0;
+      for (const word of words) {
+        const test = current ? current + ' ' + word : word;
+        const w = measureCtx.measureText(test).width;
+        if (w <= maxLineWidth || !current) {
+          current = test;
+          if (w > maxW) maxW = w;
+        } else {
+          lines.push(current);
+          current = word;
+          maxW = Math.max(maxW, measureCtx.measureText(current).width);
+        }
+        if (lines.length >= MAX_LINES) break;
+      }
+      if (lines.length < MAX_LINES && current) {
+        lines.push(current);
+        maxW = Math.max(maxW, measureCtx.measureText(current).width);
+      }
+      // Ellipsis if too many words
+      if (lines.length > MAX_LINES) {
+        lines.length = MAX_LINES;
+      }
+      if (words.length && lines.length === MAX_LINES) {
+        // If there are leftover words, add ellipsis to last line conservatively
+        const last = lines[lines.length - 1];
+        let withEllipsis = last + '…';
+        while (measureCtx.measureText(withEllipsis).width > maxLineWidth && withEllipsis.length > 1) {
+          withEllipsis = withEllipsis.slice(0, -2) + '…';
+        }
+        lines[lines.length - 1] = withEllipsis;
+        maxW = Math.max(maxW, measureCtx.measureText(withEllipsis).width);
+      }
+      return { lines, width: maxW };
+    }
+    // Load stored layout once (per component lifetime)
     if (Object.keys(layoutRef.current).length === 0) {
       try {
         const raw = localStorage.getItem(LAYOUT_KEY);
@@ -741,75 +781,100 @@ function GraphVis({
         /* ignore */
       }
     }
-    const nodes: any[] = data.nodes.map((n) => {
-      const base: any = { ...n };
-      const prev = prevMap.get(n.id);
-      const stored = layoutRef.current[n.id];
-      if (prev) {
-        base.x = prev.x;
-        base.y = prev.y;
-        if (typeof prev.vx === 'number') base.vx = prev.vx;
-        if (typeof prev.vy === 'number') base.vy = prev.vy;
-        if (prev.fx !== undefined) base.fx = prev.fx;
-        if (prev.fy !== undefined) base.fy = prev.fy;
-      } else if (stored) {
-        base.x = stored.x;
-        base.y = stored.y;
-        // Fix to stored coordinates initially so simulation doesn't drift them
-        base.fx = stored.x;
-        base.fy = stored.y;
+  // Build DAG from edges (edges are from consumer -> provider in data; we want arrows provider -> consumer visually)
+    const idToChildren = new Map<string, Set<string>>();
+    for (const n of data.nodes) {
+      idToChildren.set(n.id, new Set());
+    }
+    for (const e of data.edges) {
+      // edge is from consumer to provider; invert to show flow provider -> consumer
+      const provider = e.to;
+      const consumer = e.from;
+      if (!idToChildren.has(provider)) idToChildren.set(provider, new Set());
+      idToChildren.get(provider)!.add(consumer);
+    }
+    // Convert to stratify input: one entry per node with parentIds listing all providers
+    const parentsMap = new Map<string, Set<string>>();
+    for (const n of data.nodes) parentsMap.set(n.id, new Set());
+    for (const [provider, children] of idToChildren.entries()) {
+      for (const consumer of children) {
+        parentsMap.get(consumer)!.add(provider);
       }
-      const d = typeof n.depth === 'number' ? n.depth : 0;
-      const targetY = d * layerGap + 40;
-      if (!prev && !stored) {
-        base.y = targetY + (Math.random() * 10 - 5);
-        base.fy = targetY; // only pin depth for nodes without stored layout
+    }
+    const dagInput: Array<{ id: string; parentIds: string[] }> = Array.from(parentsMap, ([id, parents]) => ({
+      id,
+      parentIds: Array.from(parents),
+    }));
+  const dag = d3dag.graphStratify()(dagInput);
+    // Use grid layout for a clean topological look
+    // Pre-compute node sizes with wrapping
+    for (const n of data.nodes) {
+      const content = wrapText(n.name, MAX_W - PAD_X * 2);
+      const w = Math.min(Math.max(MIN_W, content.width + PAD_X * 2), MAX_W);
+      const h = content.lines.length * LINE_HEIGHT + PAD_Y * 2;
+      measureCache.set(n.id, { w, h, lines: content.lines });
+    }
+    const layout = d3dag
+      .grid()
+      .nodeSize((n: any) => {
+        const dims = measureCache.get(n.data.id)!;
+        return [dims.w, dims.h];
+      })
+      .gap([72, 60]);
+    const layoutResult = layout(dag);
+    // Map positions from dag after layout
+    const nodes: any[] = [];
+    for (const n of dag.nodes()) {
+      const meta = data.nodes.find((x) => x.id === (n as any).data.id)!;
+      const x = (n as any).x as number;
+      const y = (n as any).y as number;
+  const dims = measureCache.get(meta.id)!;
+  const w = dims.w;
+  const h = dims.h;
+      let nx = x,
+        ny = y,
+        fx = x,
+        fy = y;
+      const stored = layoutRef.current[meta.id];
+      if (stored) {
+        nx = stored.x;
+        ny = stored.y;
+        fx = stored.x;
+        fy = stored.y;
       }
-      base._depth = d;
-      // dynamic sizing
-      const paddingX = 16;
-      const minW = 72;
-      // Width exactly sized to full label (no truncation) with left/right padding
-      let w = measureCtx.measureText(n.name).width + paddingX;
-      if (w < minW) w = minW;
-      base._w = w;
-      base._h = 44;
-      base._label = n.name; // store full label
-      return base;
-    });
-    const links: any[] = data.edges.map((e) => ({
-      source: e.from,
-      target: e.to,
+  nodes.push({ ...meta, x: nx, y: ny, fx, fy, _w: w, _h: h, _label: meta.name, _lines: measureCache.get(meta.id)!.lines });
+    }
+    const nodeById = new Map(nodes.map((n) => [n.id, n] as const));
+    const links: any[] = [];
+    for (const l of dag.links()) {
+      const srcId = (l as any).source.data.id;
+      const tgtId = (l as any).target.data.id;
+      // Our semantic edge data lives on consumer->provider, but our draw arrow will use provider->consumer
+      const back = data.edges.find((e) => e.from === tgtId && e.to === srcId);
+      links.push({
+        source: nodeById.get(srcId)!,
+        target: nodeById.get(tgtId)!,
+        name: back?.name ?? '',
+        status: back?.status ?? 'OK',
+        latencyMs: back?.latencyMs,
+      });
+    }
+    // Logical edges for traversal highlighting (consumer -> provider)
+    const logicalLinks: any[] = data.edges.map((e) => ({
+      source: nodeById.get(e.from)!,
+      target: nodeById.get(e.to)!,
       name: e.name,
       status: e.status,
       latencyMs: e.latencyMs,
-      _key: `${e.to}<-${e.from}::${e.name}`,
     }));
     nodesRef.current = nodes;
     linksRef.current = links;
-    // stop previous sim if exists
-    if (simRef.current) simRef.current.stop();
-    const sim = forceSimulation(nodes)
-      .force(
-        'link',
-        forceLink(links)
-          .id((d: any) => d.id)
-          .distance(() => 200)
-          .strength(0.65)
-      )
-      .force('charge', forceManyBody().strength(-900))
-      .force('center', forceCenter(dims.w / 2, dims.h / 2))
-      .force(
-        'collide',
-        forceCollide()
-          .radius((d: any) => (d.external ? 40 : d._w / 2 + 28))
-          .strength(0.95)
-      );
-    // If there were previous positions, start with lower alpha to avoid drastic movement
-    if (prevMap.size > 0) {
-      sim.alpha(0.4);
+    logicalLinksRef.current = logicalLinks;
+    // No force sim; create a stub with a draw trigger
+    if (simRef.current && typeof simRef.current.stop === 'function') {
+      try { simRef.current.stop(); } catch {}
     }
-    simRef.current = sim;
+    simRef.current = { alpha: () => 0, alphaMin: () => 0, alphaTarget: () => {}, restart: () => {} };
     function statusColor(status: string) {
       return status === 'OK'
         ? '#16a34a'
@@ -819,7 +884,7 @@ function GraphVis({
             ? '#dc2626'
             : '#64748b';
     }
-    function boundaryDistance(node: any, ux: number, uy: number) {
+  function boundaryDistance(node: any, ux: number, uy: number) {
       // distance from center to boundary along direction (ux,uy)
       if (node.external) {
         return 20; // external circle radius
@@ -877,86 +942,97 @@ function GraphVis({
       if (latest) {
         const statusMap = new Map<string, string>();
         for (const n of latest.nodes) statusMap.set(n.id, n.status);
-        for (const n of nodes) if (statusMap.has(n.id)) n.status = statusMap.get(n.id);
-        const edgeStatusKey = new Map<string, string>();
-        for (const e of latest.edges) edgeStatusKey.set(`${e.from}|${e.to}|${e.name}`, e.status);
+        for (const n of nodes) if (statusMap.has(n.id)) n.status = statusMap.get(n.id)!;
+        // update edge statuses/latency based on latest server edges (consumer->provider)
+        const edgeStatus = new Map<string, string>();
+        const edgeLatency = new Map<string, number | undefined>();
+        for (const e of latest.edges) {
+          edgeStatus.set(`${e.to}|${e.from}`, e.status);
+          edgeLatency.set(`${e.to}|${e.from}`, e.latencyMs);
+        }
         for (const l of links) {
-          const sId = l.source && l.source.id ? l.source.id : l.source;
-          const tId = l.target && l.target.id ? l.target.id : l.target;
-          const key = `${sId}|${tId}|${l.name}`;
-          if (edgeStatusKey.has(key)) l.status = edgeStatusKey.get(key);
+          const sId = l.source.id;
+          const tId = l.target.id;
+          const key = `${sId}|${tId}`; // provider -> consumer
+          if (edgeStatus.has(key)) l.status = edgeStatus.get(key)!;
+          if (edgeLatency.has(key)) l.latencyMs = edgeLatency.get(key);
         }
       }
       // highlight calculation
-      let highlightEdgeSet: Set<any> | null = null;
+      let highlightEdgeKeySet: Set<string> | null = null; // keys as `${src}|${tgt}` for draw links
       let highlightNodeSet: Set<string> | null = null;
       const selEdge = selectedEdgeRef.current;
       if (selEdge) {
-        const providerId = selEdge.target && selEdge.target.id ? selEdge.target.id : selEdge.target;
-        const consumerId = selEdge.source && selEdge.source.id ? selEdge.source.id : selEdge.source;
+        // draw edge is provider -> consumer
+        const providerId = selEdge.source && selEdge.source.id ? selEdge.source.id : selEdge.source;
+        const consumerId = selEdge.target && selEdge.target.id ? selEdge.target.id : selEdge.target;
         const queue: string[] = [providerId];
         const visited = new Set<string>([providerId]);
-        const edgesUp = new Set<any>([selEdge]);
+        const edgeKeys = new Set<string>();
+        edgeKeys.add(`${providerId}|${consumerId}`);
         const nodesUp = new Set<string>([providerId, consumerId]);
         let guard = 0;
-        while (queue.length && guard < links.length * 10) {
+        const logical = logicalLinksRef.current;
+        while (queue.length && guard < logical.length * 10) {
           guard++;
           const current = queue.shift()!;
-          for (const l of links) {
-            const sId = l.source && l.source.id ? l.source.id : l.source;
-            const tId = l.target && l.target.id ? l.target.id : l.target;
-            if (sId === current) {
+          for (const l of logical) {
+            const sId = l.source && l.source.id ? l.source.id : l.source; // consumer
+            const tId = l.target && l.target.id ? l.target.id : l.target; // provider
+            if (sId === current) { // move upstream to provider
               if (!visited.has(tId)) {
                 visited.add(tId);
                 queue.push(tId);
               }
-              edgesUp.add(l);
+              // draw orientation is provider -> consumer
+              edgeKeys.add(`${tId}|${sId}`);
               nodesUp.add(tId);
               nodesUp.add(sId);
             }
           }
         }
-        highlightEdgeSet = edgesUp;
+        highlightEdgeKeySet = edgeKeys;
         highlightNodeSet = nodesUp;
       } else {
         const selId = selectedIdRef.current;
         if (selId) {
           const queue: string[] = [selId];
           const visited = new Set<string>([selId]);
-          const edgesUp = new Set<any>();
+          const edgeKeys = new Set<string>();
           const nodesUp = new Set<string>([selId]);
           let guard = 0;
-          while (queue.length && guard < links.length * 10) {
+          const logical = logicalLinksRef.current;
+          while (queue.length && guard < logical.length * 10) {
             guard++;
             const current = queue.shift()!;
-            for (const l of links) {
-              const sId = l.source && l.source.id ? l.source.id : l.source;
-              const tId = l.target && l.target.id ? l.target.id : l.target;
+            for (const l of logical) {
+              const sId = l.source && l.source.id ? l.source.id : l.source; // consumer
+              const tId = l.target && l.target.id ? l.target.id : l.target; // provider
               if (sId === current) {
                 if (!visited.has(tId)) {
                   visited.add(tId);
                   queue.push(tId);
                 }
-                edgesUp.add(l);
+                edgeKeys.add(`${tId}|${sId}`);
                 nodesUp.add(tId);
               }
             }
           }
-          highlightEdgeSet = edgesUp;
+          highlightEdgeKeySet = edgeKeys;
           highlightNodeSet = nodesUp;
         }
       }
       edgeGeomRef.current = [];
       for (const l of links) {
-        const origFrom: any = l.source;
-        const origTo: any = l.target;
-        const from = origTo;
-        const to = origFrom;
+        const from: any = l.source; // provider
+        const to: any = l.target;   // consumer
         const color = statusColor(l.status);
-        const highlighted = highlightEdgeSet ? highlightEdgeSet.has(l) : false;
+        const sId = from && from.id ? from.id : from;
+        const tId = to && to.id ? to.id : to;
+        const highlighted = highlightEdgeKeySet ? highlightEdgeKeySet.has(`${sId}|${tId}`) : false;
         const prevLineWidth = ctx.lineWidth;
         const prevAlpha = ctx.globalAlpha;
-        if (!highlighted && highlightEdgeSet) {
+        if (!highlighted && highlightEdgeKeySet) {
           ctx.globalAlpha = 0.15;
           ctx.lineWidth = 2;
         } else if (highlighted) {
@@ -966,14 +1042,57 @@ function GraphVis({
           ctx.globalAlpha = 0.55;
           ctx.lineWidth = 2;
         }
-        const mid = drawArrow(from, to, color);
+        // Rounded elbow path via midY
+        const midY = (from.y + to.y) / 2;
+        const pts = [
+          { x: from.x, y: from.y },
+          { x: from.x, y: midY },
+          { x: to.x, y: midY },
+          { x: to.x, y: to.y },
+        ];
+        ctx.strokeStyle = color;
+        ctx.beginPath();
+        ctx.moveTo(pts[0].x, pts[0].y);
+        const rcorner = 10;
+        for (let i = 1; i < pts.length - 1; i++) {
+          const p0 = pts[i - 1], p1 = pts[i], p2 = pts[i + 1];
+          const v1x = p1.x - p0.x, v1y = p1.y - p0.y;
+          const v2x = p2.x - p1.x, v2y = p2.y - p1.y;
+          const len1 = Math.max(1, Math.hypot(v1x, v1y));
+          const len2 = Math.max(1, Math.hypot(v2x, v2y));
+          const ux1 = v1x / len1, uy1 = v1y / len1;
+          const ux2 = v2x / len2, uy2 = v2y / len2;
+          const p1a = { x: p1.x - ux1 * rcorner, y: p1.y - uy1 * rcorner };
+          const p1b = { x: p1.x + ux2 * rcorner, y: p1.y + uy2 * rcorner };
+          ctx.lineTo(p1a.x, p1a.y);
+          ctx.quadraticCurveTo(p1.x, p1.y, p1b.x, p1b.y);
+        }
+        ctx.lineTo(pts[pts.length - 1].x, pts[pts.length - 1].y);
+        ctx.stroke();
+        // Arrowhead based on last segment
+        const a = pts[pts.length - 2];
+        const b = pts[pts.length - 1];
+        const dx = b.x - a.x, dy = b.y - a.y;
+        const dlen = Math.max(1, Math.hypot(dx, dy));
+        const ux = dx / dlen, uy = dy / dlen;
+        const endX = b.x, endY = b.y;
+        const ahLen = 10, ahW = 6;
+        const baseX = endX - ux * ahLen, baseY = endY - uy * ahLen;
+        ctx.fillStyle = color;
+        ctx.beginPath();
+        ctx.moveTo(endX, endY);
+        ctx.lineTo(baseX + -uy * ahW, baseY + ux * ahW);
+        ctx.lineTo(baseX + uy * ahW, baseY - ux * ahW);
+        ctx.closePath();
+        ctx.fill();
+        // Save a simple bbox for hit test fallback
         edgeGeomRef.current.push({ link: l, x1: from.x, y1: from.y, x2: to.x, y2: to.y });
         ctx.lineWidth = prevLineWidth;
         ctx.globalAlpha = prevAlpha;
         if (
           l.latencyMs !== undefined &&
           l.latencyMs !== null &&
-          (!highlightEdgeSet || highlightEdgeSet.has(l))
+          (!highlightEdgeKeySet || highlighted)
         ) {
           const label = `${l.latencyMs}ms`;
           ctx.save();
@@ -982,11 +1101,13 @@ function GraphVis({
           ctx.textAlign = 'center';
           ctx.textBaseline = 'middle';
           const off = 14;
-          const nx = (mid as any).nx ?? 0;
-          const ny = (mid as any).ny ?? -1;
+          const nx = -uy;
+          const ny = ux;
           const { scale, tx, ty } = transformRef.current;
-          const sx = mid.mx * scale + tx;
-          const sy = mid.my * scale + ty;
+          const midX = (pts[1].x + pts[2].x) / 2;
+          const midY = (pts[1].y + pts[2].y) / 2;
+          const sx = midX * scale + tx;
+          const sy = midY * scale + ty;
           const lx = sx + nx * off;
           const ly = sy + ny * off;
           const metrics = ctx.measureText(label);
@@ -1035,33 +1156,41 @@ function GraphVis({
         } else {
           const halfW = n._w ? n._w / 2 : 36;
           const halfH = n._h ? n._h / 2 : 22;
+          // rounded rect
+          const x0 = n.x - halfW, y0 = n.y - halfH, w = halfW * 2, h = halfH * 2, r = 8;
           ctx.beginPath();
-          ctx.rect(n.x - halfW, n.y - halfH, halfW * 2, halfH * 2);
+          ctx.moveTo(x0 + r, y0);
+          ctx.lineTo(x0 + w - r, y0);
+          ctx.quadraticCurveTo(x0 + w, y0, x0 + w, y0 + r);
+          ctx.lineTo(x0 + w, y0 + h - r);
+          ctx.quadraticCurveTo(x0 + w, y0 + h, x0 + w - r, y0 + h);
+          ctx.lineTo(x0 + r, y0 + h);
+          ctx.quadraticCurveTo(x0, y0 + h, x0, y0 + h - r);
+          ctx.lineTo(x0, y0 + r);
+          ctx.quadraticCurveTo(x0, y0, x0 + r, y0);
           ctx.fill();
           ctx.stroke();
         }
-        ctx.save();
-        ctx.setTransform(1, 0, 0, 1, 0, 0);
-        const { scale, tx, ty } = transformRef.current;
-        const sx = n.x * scale + tx;
-        const sy = n.y * scale + ty;
-        ctx.font = '11px system-ui';
+        // Labels: draw under current transform so text scales with zoom
+        ctx.font = `${BASE_FONT_PX}px system-ui`;
         ctx.fillStyle = '#0f172a';
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
-        const label = n._label || n.name;
-        ctx.fillText(label, sx, sy);
-        ctx.restore();
+        const lines: string[] = n._lines || [n._label || n.name];
+        const totalH = lines.length * LINE_HEIGHT;
+        let y = n.y - totalH / 2 + LINE_HEIGHT / 2;
+        for (const line of lines) {
+          ctx.fillText(line, n.x, y);
+          y += LINE_HEIGHT;
+        }
       }
     }
-    // initial draw via simulation tick
-    sim.on('tick', () => {
-      draw();
-    });
-    // draw once quickly (in case simulation stops early)
+  // initial draw
     draw();
+  drawRef.current = draw;
+  (simRef.current as any)._drawCustom = draw;
     return () => {
-      sim.stop();
+      // nothing
     };
   }, [data, dims.w, dims.h]);
   // capture clicks
@@ -1084,48 +1213,38 @@ function GraphVis({
       return undefined;
     }
     function hitEdge(x: number, y: number): any | null {
-      // x,y are world coords. We'll compute distance to each segment.
-      const maxDist = 8; // world-space tolerance (will scale with zoom roughly ok)
+      const maxDist = 8;
       let closest: { link: any; dist: number } | null = null;
-      for (const eg of edgeGeomRef.current) {
-        const { x1, y1, x2, y2, link } = eg as any;
-        const dx = x2 - x1;
-        const dy = y2 - y1;
-        const len2 = dx * dx + dy * dy || 1;
-        let t = ((x - x1) * dx + (y - y1) * dy) / len2;
-        if (t < 0) t = 0;
-        else if (t > 1) t = 1;
-        const px = x1 + dx * t;
-        const py = y1 + dy * t;
-        const ddx = x - px;
-        const ddy = y - py;
-        const dist = Math.sqrt(ddx * ddx + ddy * ddy);
-        if (dist <= maxDist && (!closest || dist < closest.dist)) closest = { link, dist };
+      for (const l of linksRef.current) {
+        const from: any = l.source;
+        const to: any = l.target;
+        const midY = (from.y + to.y) / 2;
+        const pts = [
+          { x: from.x, y: from.y },
+          { x: from.x, y: midY },
+          { x: to.x, y: midY },
+          { x: to.x, y: to.y },
+        ];
+        for (let i = 0; i < pts.length - 1; i++) {
+          const { x: x1, y: y1 } = pts[i];
+          const { x: x2, y: y2 } = pts[i + 1];
+          const dx = x2 - x1;
+          const dy = y2 - y1;
+          const len2 = dx * dx + dy * dy || 1;
+          let t = ((x - x1) * dx + (y - y1) * dy) / len2;
+          if (t < 0) t = 0;
+          else if (t > 1) t = 1;
+          const px = x1 + dx * t;
+          const py = y1 + dy * t;
+          const dist = Math.hypot(x - px, y - py);
+          if (dist <= maxDist && (!closest || dist < closest.dist)) closest = { link: l, dist };
+        }
       }
       return closest?.link || null;
     }
-    function scheduleRedraw() {
-      // use rAF batching
-      requestAnimationFrame(() => {
-        const ctx = canvasRef.current?.getContext('2d');
-        // trigger draw by nudging simulation alpha if halted OR manually calling draw
-        if (simRef.current && simRef.current.alpha() > simRef.current.alphaMin()) {
-          // active simulation will redraw on next tick
-        } else {
-          // manual draw
-          const drawFn = (simRef.current as any)?._drawCustom || null;
-        }
-      });
-    }
     function customDraw() {
-      // invoke internal draw through restarting minimal alpha if available
-      const ctx = canvasRef.current?.getContext('2d');
-      if (!ctx) return;
-      // reproduce core draw by triggering one tickless render: reuse effect's draw via storing global
-      // Simpler: restart tiny alpha; tick handler will render quickly.
-      if (simRef.current) {
-        simRef.current.alpha(0.001).restart();
-      }
+      const fn = drawRef.current;
+      if (fn) requestAnimationFrame(fn);
     }
     function onWheel(ev: WheelEvent) {
       ev.preventDefault();
@@ -1159,10 +1278,9 @@ function GraphVis({
       dragRef.current.origTy = transformRef.current.ty;
       dragRef.current.moved = false;
       if (node) {
-        // lock node position for dragging
+        // start dragging
         node.fx = node.x;
         node.fy = node.y;
-        if (simRef.current) simRef.current.alphaTarget(0.3).restart();
         canvas.style.cursor = 'grabbing';
       } else {
         canvas.style.cursor = 'grabbing';
@@ -1180,6 +1298,8 @@ function GraphVis({
         const { wx, wy } = toWorld(x, y);
         dragRef.current.node.fx = wx;
         dragRef.current.node.fy = wy;
+        dragRef.current.node.x = wx;
+        dragRef.current.node.y = wy;
         customDraw();
       } else if (dragRef.current.mode === 'pan') {
         const dx = x - dragRef.current.startX;
@@ -1197,11 +1317,10 @@ function GraphVis({
       }
     }
     function onUp(ev: MouseEvent) {
-      const wasNode = dragRef.current.mode === 'node';
+  const wasNode = dragRef.current.mode === 'node';
       const node = dragRef.current.node;
       if (wasNode && node) {
         // release but keep fixed position
-        if (simRef.current) simRef.current.alphaTarget(0);
         if (canvas) canvas.style.cursor = 'grab';
         if (canvas) canvas.style.cursor = 'grab';
         if (!dragRef.current.moved) {
@@ -1218,12 +1337,12 @@ function GraphVis({
           if (edge) {
             selectedEdgeRef.current = edge; // select edge
             selectedIdRef.current = undefined; // clear node selection
-            if (simRef.current) simRef.current.alpha(0.02).restart();
+    customDraw();
           } else {
             // background click clears edge selection only
             if (selectedEdgeRef.current) {
               selectedEdgeRef.current = null;
-              if (simRef.current) simRef.current.alpha(0.02).restart();
+      customDraw();
             }
           }
         }
